@@ -1,0 +1,7 @@
+.//usr/libexec/ksmctl
+.//usr/libexec/qemu-bridge-helper
+.//usr/libexec/qemu-kvm
+.//usr/bin/qemu-nbd
+.//usr/bin/qemu-img
+.//usr/bin/qemu-io
+.//usr/bin/qemu-pr-helper

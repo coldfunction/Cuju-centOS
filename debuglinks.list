@@ -1,0 +1,15 @@
+/usr/lib/debug/.build-id/a7/1e09b0aa5852a3f8cf312c4259c34d4e334eb2 /usr/libexec/ksmctl
+/usr/lib/debug/.build-id/a7/1e09b0aa5852a3f8cf312c4259c34d4e334eb2.debug /usr/lib/debug/usr/libexec/ksmctl.debug
+/usr/lib/debug/.build-id/9f/5068052c50043a913ba010a0b3c11a4061acc7 /usr/libexec/qemu-bridge-helper
+/usr/lib/debug/.build-id/9f/5068052c50043a913ba010a0b3c11a4061acc7.debug /usr/lib/debug/usr/libexec/qemu-bridge-helper.debug
+/usr/lib/debug/.build-id/13/e8bf169ea7cfa183bb3aba657067407e472d41 /usr/libexec/qemu-kvm
+/usr/lib/debug/.build-id/13/e8bf169ea7cfa183bb3aba657067407e472d41.debug /usr/lib/debug/usr/libexec/qemu-kvm.debug
+/usr/lib/debug/.build-id/61/888f40fb96ad29a4a867fe04afd3ed28eb987c /usr/bin/qemu-nbd
+/usr/lib/debug/.build-id/61/888f40fb96ad29a4a867fe04afd3ed28eb987c.debug /usr/lib/debug/usr/bin/qemu-nbd.debug
+/usr/lib/debug/.build-id/42/fa1826596daaa092b1386412950ab10ddf4ff4 /usr/bin/qemu-img
+/usr/lib/debug/.build-id/42/fa1826596daaa092b1386412950ab10ddf4ff4.debug /usr/lib/debug/usr/bin/qemu-img.debug
+/usr/lib/debug/.build-id/c1/e823e62e6ab643991e428ea4b0b5e91c8af30f /usr/bin/qemu-io
+/usr/lib/debug/.build-id/c1/e823e62e6ab643991e428ea4b0b5e91c8af30f.debug /usr/lib/debug/usr/bin/qemu-io.debug
+/usr/lib/debug/.build-id/06/74bc82ec8db96d41213296fa64919afdb528fb /usr/bin/qemu-pr-helper
+/usr/lib/debug/.build-id/06/74bc82ec8db96d41213296fa64919afdb528fb.debug /usr/lib/debug/usr/bin/qemu-pr-helper.debug
+/usr/lib/debug/.build-id/14/0a8942d63cb8dff4cacb5a42eb5058711ffd3b.debug /usr/lib/debug/.dwz/qemu-kvm-ev-2.12.0-44.1.el7_8.1.x86_64
