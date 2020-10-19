@@ -27,6 +27,7 @@
 #include <dirent.h>
 #include "qapi/error.h"
 #include "block/block_int.h"
+#include "block/qdict.h"
 #include "qemu/module.h"
 #include "qemu/option.h"
 #include "qemu/bswap.h"
@@ -1261,15 +1262,9 @@ static int vvfat_open(BlockDriverState *bs, QDict *options, int flags,
                        "Unable to set VVFAT to 'rw' when drive is read-only");
             goto fail;
         }
-    } else  if (!bdrv_is_read_only(bs)) {
-        error_report("Opening non-rw vvfat images without an explicit "
-                     "read-only=on option is deprecated. Future versions "
-                     "will refuse to open the image instead of "
-                     "automatically marking the image read-only.");
-        /* read only is the default for safety */
-        ret = bdrv_set_read_only(bs, true, &local_err);
+    } else {
+        ret = bdrv_apply_auto_read_only(bs, NULL, errp);
         if (ret < 0) {
-            error_propagate(errp, local_err);
             goto fail;
         }
     }
@@ -3129,10 +3124,12 @@ static void vvfat_qcow_options(int *child_flags, QDict *child_options,
                                int parent_flags, QDict *parent_options)
 {
     qdict_set_default_str(child_options, BDRV_OPT_READ_ONLY, "off");
+    qdict_set_default_str(child_options, BDRV_OPT_AUTO_READ_ONLY, "off");
     qdict_set_default_str(child_options, BDRV_OPT_CACHE_NO_FLUSH, "on");
 }
 
 static const BdrvChildRole child_vvfat_qcow = {
+    .parent_is_bds      = true,
     .inherit_options    = vvfat_qcow_options,
 };
 
@@ -3179,7 +3176,7 @@ static int enable_write_target(BlockDriverState *bs, Error **errp)
     qdict_put_str(options, "write-target.driver", "qcow");
     s->qcow = bdrv_open_child(s->qcow_filename, options, "write-target", bs,
                               &child_vvfat_qcow, false, errp);
-    QDECREF(options);
+    qobject_unref(options);
     if (!s->qcow) {
         ret = -EINVAL;
         goto err;

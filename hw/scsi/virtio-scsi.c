@@ -20,6 +20,7 @@
 #include "qemu/error-report.h"
 #include "qemu/iov.h"
 #include "sysemu/block-backend.h"
+#include "sysemu/blockdev.h"
 #include "hw/scsi/scsi.h"
 #include "scsi/constants.h"
 #include "hw/virtio/virtio-bus.h"
@@ -790,15 +791,39 @@ static void virtio_scsi_hotplug(HotplugHandler *hotplug_dev, DeviceState *dev,
     VirtIOSCSI *s = VIRTIO_SCSI(vdev);
     SCSIDevice *sd = SCSI_DEVICE(dev);
 
+    /* XXX: Remove this check once block backend is capable of handling
+     * AioContext change upon eject/insert.
+     * s->ctx is NULL if ioeventfd is off, s->ctx is qemu_get_aio_context() if
+     * data plane is not used, both cases are safe for scsi-cd. */
+    if (s->ctx && s->ctx != qemu_get_aio_context() &&
+        object_dynamic_cast(OBJECT(dev), "scsi-cd")) {
+        error_setg(errp, "scsi-cd is not supported by data plane");
+        return;
+    }
     if (s->ctx && !s->dataplane_fenced) {
+        AioContext *ctx;
         if (blk_op_is_blocked(sd->conf.blk, BLOCK_OP_TYPE_DATAPLANE, errp)) {
+            return;
+        }
+        ctx = blk_get_aio_context(sd->conf.blk);
+        if (ctx != s->ctx && ctx != qemu_get_aio_context()) {
+            error_setg(errp, "Cannot attach a blockdev that is using "
+                       "a different iothread");
             return;
         }
         virtio_scsi_acquire(s);
         blk_set_aio_context(sd->conf.blk, s->ctx);
         virtio_scsi_release(s);
-
     }
+}
+
+/* Announce the new device after it has been plugged */
+static void virtio_scsi_post_hotplug(HotplugHandler *hotplug_dev,
+                                     DeviceState *dev)
+{
+    VirtIODevice *vdev = VIRTIO_DEVICE(hotplug_dev);
+    VirtIOSCSI *s = VIRTIO_SCSI(vdev);
+    SCSIDevice *sd = SCSI_DEVICE(dev);
 
     if (virtio_vdev_has_feature(vdev, VIRTIO_SCSI_F_HOTPLUG)) {
         virtio_scsi_acquire(s);
@@ -815,6 +840,9 @@ static void virtio_scsi_hotunplug(HotplugHandler *hotplug_dev, DeviceState *dev,
     VirtIODevice *vdev = VIRTIO_DEVICE(hotplug_dev);
     VirtIOSCSI *s = VIRTIO_SCSI(vdev);
     SCSIDevice *sd = SCSI_DEVICE(dev);
+    AioContext *ctx = s->ctx ?: qemu_get_aio_context();
+    BlockDriverState *bs;
+    DriveInfo *dinfo;
 
     if (virtio_vdev_has_feature(vdev, VIRTIO_SCSI_F_HOTPLUG)) {
         virtio_scsi_acquire(s);
@@ -824,7 +852,31 @@ static void virtio_scsi_hotunplug(HotplugHandler *hotplug_dev, DeviceState *dev,
         virtio_scsi_release(s);
     }
 
+    /*
+     * This SCSIDevice goes away after calling qdev_simple_device_unplug_cb(),
+     * so get a reference to the underlying BDS here to be able to switch
+     * its AioContext afterwards.
+     */
+    bs = blk_bs(sd->conf.blk);
+
+    /*
+     * Drives attached to a legacy device will get auto deleted while
+     * unplugging the latter, so we don't need to switch their context.
+     * Get a reference to dinfo here, which is only NULL for non-legacy
+     * devices, and use it to avoid doing the switch for drives attached
+     * to legacy devices.
+     */
+    dinfo = blk_legacy_dinfo(sd->conf.blk);
+
+    aio_disable_external(ctx);
     qdev_simple_device_unplug_cb(hotplug_dev, dev, errp);
+    aio_enable_external(ctx);
+
+    if (s->ctx && bs && !dinfo) {
+        virtio_scsi_acquire(s);
+        bdrv_set_aio_context(bs, qemu_get_aio_context());
+        virtio_scsi_release(s);
+    }
 }
 
 static struct SCSIBusInfo virtio_scsi_scsi_info = {
@@ -968,6 +1020,7 @@ static void virtio_scsi_class_init(ObjectClass *klass, void *data)
     vdc->start_ioeventfd = virtio_scsi_dataplane_start;
     vdc->stop_ioeventfd = virtio_scsi_dataplane_stop;
     hc->plug = virtio_scsi_hotplug;
+    hc->post_plug = virtio_scsi_post_hotplug;
     hc->unplug = virtio_scsi_hotunplug;
 }
 

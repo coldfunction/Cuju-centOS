@@ -130,7 +130,7 @@ ETEXI
 DEF("accel", HAS_ARG, QEMU_OPTION_accel,
     "-accel [accel=]accelerator[,thread=single|multi]\n"
     "                select accelerator (kvm, xen, hax, hvf, whpx or tcg; use 'help' for a list)\n"
-    "                thread=single|multi (enable multi-threaded TCG)", QEMU_ARCH_ALL)
+    "                thread=single|multi (enable multi-threaded TCG)\n", QEMU_ARCH_ALL)
 STEXI
 @item -accel @var{name}[,prop=@var{value}[,...]]
 @findex -accel
@@ -263,7 +263,7 @@ This option defines a free-form string that can be used to describe @var{fd}.
 
 You can open an image using pre-opened file descriptors from an fd set:
 @example
-qemu-system-i386
+qemu-kvm
 -add-fd fd=3,set=2,opaque="rdwr:/path/to/file"
 -add-fd fd=4,set=2,opaque="rdonly:/path/to/file"
 -drive file=/dev/fdset/2,index=0,media=disk
@@ -292,7 +292,7 @@ STEXI
 Set default value of @var{driver}'s property @var{prop} to @var{value}, e.g.:
 
 @example
-qemu-system-i386 -global ide-hd.physical_block_size=4096 disk-image.img
+qemu-kvm -global ide-hd.physical_block_size=4096 disk-image.img
 @end example
 
 In particular, you can use this to set driver properties for devices which are
@@ -346,11 +346,11 @@ bootindex options. The default is non-strict boot.
 
 @example
 # try to boot from network first, then from hard disk
-qemu-system-i386 -boot order=nc
+qemu-kvm -boot order=nc
 # boot from CD-ROM first, switch back to default order after reboot
-qemu-system-i386 -boot once=d
+qemu-kvm -boot once=d
 # boot with a splash picture for 5 seconds.
-qemu-system-i386 -boot menu=on,splash=/root/boot.bmp,splash-time=5000
+qemu-kvm -boot menu=on,splash=/root/boot.bmp,splash-time=5000
 @end example
 
 Note: The legacy format '-boot @var{drives}' is still supported but its
@@ -379,7 +379,7 @@ For example, the following command-line sets the guest startup RAM size to
 memory the guest can reach to 4GB:
 
 @example
-qemu-system-x86_64 -m 1G,slots=3,maxmem=4G
+qemu-kvm -m 1G,slots=3,maxmem=4G
 @end example
 
 If @var{slots} and @var{maxmem} are not specified, memory hotplug won't
@@ -448,12 +448,12 @@ Enable audio and selected sound hardware. Use 'help' to print all
 available sound hardware.
 
 @example
-qemu-system-i386 -soundhw sb16,adlib disk.img
-qemu-system-i386 -soundhw es1370 disk.img
-qemu-system-i386 -soundhw ac97 disk.img
-qemu-system-i386 -soundhw hda disk.img
-qemu-system-i386 -soundhw all disk.img
-qemu-system-i386 -soundhw help
+qemu-kvm -soundhw sb16,adlib disk.img
+qemu-kvm -soundhw es1370 disk.img
+qemu-kvm -soundhw ac97 disk.img
+qemu-kvm -soundhw hda disk.img
+qemu-kvm -soundhw all disk.img
+qemu-kvm -soundhw help
 @end example
 
 Note that Linux's i810_audio OSS kernel (for AC97) module might
@@ -752,19 +752,23 @@ image file)
 
 @item cache-size
 The maximum total size of the L2 table and refcount block caches in bytes
-(default: 1048576 bytes or 8 clusters, whichever is larger)
+(default: the sum of l2-cache-size and refcount-cache-size)
 
 @item l2-cache-size
 The maximum size of the L2 table cache in bytes
-(default: 4/5 of the total cache size)
+(default: if cache-size is not specified - 32M on Linux platforms, and 8M on
+non-Linux platforms; otherwise, as large as possible within the cache-size,
+while permitting the requested or the minimal refcount cache size)
 
 @item refcount-cache-size
 The maximum size of the refcount block cache in bytes
-(default: 1/5 of the total cache size)
+(default: 4 times the cluster size; or if cache-size is specified, the part of
+it which is not used for the L2 cache)
 
 @item cache-clean-interval
 Clean unused entries in the L2 and refcount caches. The interval is in seconds.
-The default value is 0 and it disables this feature.
+The default value is 600 on supporting platforms, and 0 on other platforms.
+Setting it to 0 disables this feature.
 
 @item pass-discard-request
 Whether discard requests to the qcow2 device should be forwarded to the data
@@ -946,21 +950,21 @@ is off.
 
 Instead of @option{-cdrom} you can use:
 @example
-qemu-system-i386 -drive file=file,index=2,media=cdrom
+qemu-kvm -drive file=file,index=2,media=cdrom
 @end example
 
 Instead of @option{-hda}, @option{-hdb}, @option{-hdc}, @option{-hdd}, you can
 use:
 @example
-qemu-system-i386 -drive file=file,index=0,media=disk
-qemu-system-i386 -drive file=file,index=1,media=disk
-qemu-system-i386 -drive file=file,index=2,media=disk
-qemu-system-i386 -drive file=file,index=3,media=disk
+qemu-kvm -drive file=file,index=0,media=disk
+qemu-kvm -drive file=file,index=1,media=disk
+qemu-kvm -drive file=file,index=2,media=disk
+qemu-kvm -drive file=file,index=3,media=disk
 @end example
 
 You can open an image using pre-opened file descriptors from an fd set:
 @example
-qemu-system-i386
+qemu-kvm
 -add-fd fd=3,set=2,opaque="rdwr:/path/to/file"
 -add-fd fd=4,set=2,opaque="rdonly:/path/to/file"
 -drive file=/dev/fdset/2,index=0,media=disk
@@ -968,28 +972,28 @@ qemu-system-i386
 
 You can connect a CDROM to the slave of ide0:
 @example
-qemu-system-i386 -drive file=file,if=ide,index=1,media=cdrom
+qemu-kvm -drive file=file,if=ide,index=1,media=cdrom
 @end example
 
 If you don't specify the "file=" argument, you define an empty drive:
 @example
-qemu-system-i386 -drive if=ide,index=1,media=cdrom
+qemu-kvm -drive if=ide,index=1,media=cdrom
 @end example
 
 Instead of @option{-fda}, @option{-fdb}, you can use:
 @example
-qemu-system-i386 -drive file=file,index=0,if=floppy
-qemu-system-i386 -drive file=file,index=1,if=floppy
+qemu-kvm -drive file=file,index=0,if=floppy
+qemu-kvm -drive file=file,index=1,if=floppy
 @end example
 
 By default, @var{interface} is "ide" and @var{index} is automatically
 incremented:
 @example
-qemu-system-i386 -drive file=a -drive file=b"
+qemu-kvm -drive file=a -drive file=b"
 @end example
 is interpreted like:
 @example
-qemu-system-i386 -hda a -hdb b
+qemu-kvm -hda a -hdb b
 @end example
 ETEXI
 
@@ -1811,11 +1815,6 @@ ETEXI
 
 DEF("no-hpet", 0, QEMU_OPTION_no_hpet,
     "-no-hpet        disable HPET\n", QEMU_ARCH_I386)
-STEXI
-@item -no-hpet
-@findex -no-hpet
-Disable HPET support.
-ETEXI
 
 DEF("acpitable", HAS_ARG, QEMU_OPTION_acpitable,
     "-acpitable [sig=str][,rev=n][,oem_id=str][,oem_table_id=str][,oem_rev=n][,asl_compiler_id=str][,asl_compiler_rev=n][,{data|file}=file1[:file2]...]\n"
@@ -2061,8 +2060,8 @@ The following two example do exactly the same, to show how @option{-nic} can
 be used to shorten the command line length (note that the e1000 is the default
 on i386, so the @option{model=e1000} parameter could even be omitted here, too):
 @example
-qemu-system-i386 -netdev user,id=n1,ipv6=off -device e1000,netdev=n1,mac=52:54:98:76:54:32
-qemu-system-i386 -nic user,ipv6=off,model=e1000,mac=52:54:98:76:54:32
+qemu-kvm -netdev user,id=n1,ipv6=off -device e1000,netdev=n1,mac=52:54:98:76:54:32
+qemu-kvm -nic user,ipv6=off,model=e1000,mac=52:54:98:76:54:32
 @end example
 
 @item -nic none
@@ -2133,7 +2132,7 @@ can not be resolved.
 
 Example:
 @example
-qemu-system-i386 -nic user,dnssearch=mgmt.example.org,dnssearch=example.org
+qemu-kvm -nic user,dnssearch=mgmt.example.org,dnssearch=example.org
 @end example
 
 @item tftp=@var{dir}
@@ -2149,7 +2148,7 @@ a guest from a local directory.
 
 Example (using pxelinux):
 @example
-qemu-system-i386 -hda linux.img -boot n -device e1000,netdev=n1 \
+qemu-kvm -hda linux.img -boot n -device e1000,netdev=n1 \
     -netdev user,id=n1,tftp=/path/to/tftp/files,bootfile=/pxelinux.0
 @end example
 
@@ -2183,7 +2182,7 @@ screen 0, use the following:
 
 @example
 # on the host
-qemu-system-i386 -nic user,hostfwd=tcp:127.0.0.1:6001-:6000
+qemu-kvm -nic user,hostfwd=tcp:127.0.0.1:6001-:6000
 # this host xterm should open in the guest X11 server
 xterm -display :1
 @end example
@@ -2193,7 +2192,7 @@ the guest, use the following:
 
 @example
 # on the host
-qemu-system-i386 -nic user,hostfwd=tcp::5555-:23
+qemu-kvm -nic user,hostfwd=tcp::5555-:23
 telnet localhost 5555
 @end example
 
@@ -2212,7 +2211,7 @@ lifetime, like in the following example:
 @example
 # open 10.10.1.1:4321 on bootup, connect 10.0.2.100:1234 to it whenever
 # the guest accesses it
-qemu-system-i386 -nic user,guestfwd=tcp:10.0.2.100:1234-tcp:10.10.1.1:4321
+qemu-kvm -nic user,guestfwd=tcp:10.0.2.100:1234-tcp:10.10.1.1:4321
 @end example
 
 Or you can execute a command on every TCP connection established by the guest,
@@ -2221,7 +2220,7 @@ so that QEMU behaves similar to an inetd process for that virtual server:
 @example
 # call "netcat 10.10.1.1 4321" on every TCP connection to 10.0.2.100:1234
 # and connect the TCP stream to its stdin/stdout
-qemu-system-i386 -nic  'user,id=n1,guestfwd=tcp:10.0.2.100:1234-cmd:netcat 10.10.1.1 4321'
+qemu-kvm -nic  'user,id=n1,guestfwd=tcp:10.0.2.100:1234-cmd:netcat 10.10.1.1 4321'
 @end example
 
 @end table
@@ -2253,21 +2252,22 @@ Examples:
 
 @example
 #launch a QEMU instance with the default network script
-qemu-system-i386 linux.img -nic tap
+qemu-kvm linux.img -nic tap
 @end example
 
 @example
 #launch a QEMU instance with two NICs, each one connected
 #to a TAP device
-qemu-system-i386 linux.img \
+qemu-kvm linux.img \
         -netdev tap,id=nd0,ifname=tap0 -device e1000,netdev=nd0 \
         -netdev tap,id=nd1,ifname=tap1 -device rtl8139,netdev=nd1
+                 -net nic,vlan=1 -net tap,vlan=1,ifname=tap1
 @end example
 
 @example
 #launch a QEMU instance with the default network helper to
 #connect a TAP device to bridge br0
-qemu-system-i386 linux.img -device virtio-net-pci,netdev=n1 \
+qemu-kvm linux.img -device virtio-net-pci,netdev=n1 \
         -netdev tap,id=n1,"helper=/path/to/qemu-bridge-helper"
 @end example
 
@@ -2284,13 +2284,13 @@ Examples:
 @example
 #launch a QEMU instance with the default network helper to
 #connect a TAP device to bridge br0
-qemu-system-i386 linux.img -netdev bridge,id=n1 -device virtio-net,netdev=n1
+qemu-kvm linux.img -netdev bridge,id=n1 -device virtio-net,netdev=n1
 @end example
 
 @example
 #launch a QEMU instance with the default network helper to
 #connect a TAP device to bridge qemubr0
-qemu-system-i386 linux.img -netdev bridge,br=qemubr0,id=n1 -device virtio-net,netdev=n1
+qemu-kvm linux.img -netdev bridge,br=qemubr0,id=n1 -device virtio-net,netdev=n1
 @end example
 
 @item -netdev socket,id=@var{id}[,fd=@var{h}][,listen=[@var{host}]:@var{port}][,connect=@var{host}:@var{port}]
@@ -2305,13 +2305,13 @@ specifies an already opened TCP socket.
 Example:
 @example
 # launch a first QEMU instance
-qemu-system-i386 linux.img \
-                 -device e1000,netdev=n1,mac=52:54:00:12:34:56 \
-                 -netdev socket,id=n1,listen=:1234
+qemu-kvm linux.img \
+         -device e1000,netdev=n1,mac=52:54:00:12:34:56 \
+         -netdev socket,id=n1,listen=:1234
 # connect the network of this instance to the network of the first instance
-qemu-system-i386 linux.img \
-                 -device e1000,netdev=n2,mac=52:54:00:12:34:57 \
-                 -netdev socket,id=n2,connect=127.0.0.1:1234
+qemu-kvm linux.img \
+         -device e1000,netdev=n2,mac=52:54:00:12:34:57 \
+         -netdev socket,id=n2,connect=127.0.0.1:1234
 @end example
 
 @item -netdev socket,id=@var{id}[,fd=@var{h}][,mcast=@var{maddr}:@var{port}[,localaddr=@var{addr}]]
@@ -2334,23 +2334,23 @@ Use @option{fd=h} to specify an already opened UDP multicast socket.
 Example:
 @example
 # launch one QEMU instance
-qemu-system-i386 linux.img \
-                 -device e1000,netdev=n1,mac=52:54:00:12:34:56 \
-                 -netdev socket,id=n1,mcast=230.0.0.1:1234
+qemu-kvm linux.img \
+         -device e1000,netdev=n1,mac=52:54:00:12:34:56 \
+         -netdev socket,id=n1,mcast=230.0.0.1:1234
 # launch another QEMU instance on same "bus"
-qemu-system-i386 linux.img \
-                 -device e1000,netdev=n2,mac=52:54:00:12:34:57 \
-                 -netdev socket,id=n2,mcast=230.0.0.1:1234
+qemu-kvm linux.img \
+         -device e1000,netdev=n2,mac=52:54:00:12:34:57 \
+         -netdev socket,id=n2,mcast=230.0.0.1:1234
 # launch yet another QEMU instance on same "bus"
-qemu-system-i386 linux.img \
-                 -device e1000,netdev=n3,macaddr=52:54:00:12:34:58 \
-                 -netdev socket,id=n3,mcast=230.0.0.1:1234
+qemu-kvm linux.img \
+         -device e1000,netdev=n3,macaddr=52:54:00:12:34:58 \
+         -netdev socket,id=n3,mcast=230.0.0.1:1234
 @end example
 
 Example (User Mode Linux compat.):
 @example
 # launch QEMU instance (note mcast address selected is UML's default)
-qemu-system-i386 linux.img \
+qemu-kvm linux.img \
                  -device e1000,netdev=n1,mac=52:54:00:12:34:56 \
                  -netdev socket,id=n1,mcast=239.192.168.1:1102
 # launch UML
@@ -2359,9 +2359,12 @@ qemu-system-i386 linux.img \
 
 Example (send packets from host's 1.2.3.4):
 @example
-qemu-system-i386 linux.img \
-                 -device e1000,netdev=n1,mac=52:54:00:12:34:56 \
-                 -netdev socket,id=n1,mcast=239.192.168.1:1102,localaddr=1.2.3.4
+qemu-kvm linux.img \
+         -device e1000,netdev=n1,mac=52:54:00:12:34:56 \
+         -netdev socket,id=n1,mcast=239.192.168.1:1102,localaddr=1.2.3.4
+qemu-kvm linux.img \
+         -net nic,macaddr=52:54:00:12:34:56 \
+         -net socket,mcast=239.192.168.1:1102,localaddr=1.2.3.4
 @end example
 
 @item -netdev l2tpv3,id=@var{id},src=@var{srcaddr},dst=@var{dstaddr}[,srcport=@var{srcport}][,dstport=@var{dstport}],txsession=@var{txsession}[,rxsession=@var{rxsession}][,ipv6][,udp][,cookie64][,counter][,pincounter][,txcookie=@var{txcookie}][,rxcookie=@var{rxcookie}][,offset=@var{offset}]
@@ -2419,7 +2422,7 @@ brctl addif br-lan vmtunnel0
 # on 4.3.2.1
 # launch QEMU instance - if your network has reorder or is very lossy add ,pincounter
 
-qemu-system-i386 linux.img -device e1000,netdev=n1 \
+qemu-kvm linux.img -device e1000,netdev=n1 \
     -netdev l2tpv3,id=n1,src=4.2.3.1,dst=1.2.3.4,udp,srcport=16384,dstport=16384,rxsession=0xffffffff,txsession=0xffffffff,counter
 
 @end example
@@ -2436,7 +2439,7 @@ Example:
 # launch vde switch
 vde_switch -F -sock /tmp/myswitch
 # launch QEMU instance
-qemu-system-i386 linux.img -nic vde,sock=/tmp/myswitch
+qemu-kvm linux.img -nic vde,sock=/tmp/myswitch
 @end example
 
 @item -netdev vhost-user,chardev=@var{id}[,vhostforce=on|off][,queues=n]
@@ -2450,11 +2453,11 @@ be created for multiqueue vhost-user.
 
 Example:
 @example
-qemu -m 512 -object memory-backend-file,id=mem,size=512M,mem-path=/hugetlbfs,share=on \
-     -numa node,memdev=mem \
-     -chardev socket,id=chr0,path=/path/to/socket \
-     -netdev type=vhost-user,id=net0,chardev=chr0 \
-     -device virtio-net-pci,netdev=net0
+qemu-kvm -m 512 -object memory-backend-file,id=mem,size=512M,mem-path=/hugetlbfs,share=on \
+         -numa node,memdev=mem \
+         -chardev socket,id=chr0,path=/path/to/socket \
+         -netdev type=vhost-user,id=net0,chardev=chr0 \
+         -device virtio-net-pci,netdev=net0
 @end example
 
 @item -netdev hubport,id=@var{id},hubid=@var{hubid}[,netdev=@var{nd}]
@@ -2884,7 +2887,7 @@ and communicate.  Requires the Linux @code{vhci} driver installed.  Can
 be used as following:
 
 @example
-qemu-system-i386 [...OPTIONS...] -bt hci,vlan=5 -bt vhci,vlan=5
+qemu-kvm [...OPTIONS...] -bt hci,vlan=5 -bt vhci,vlan=5
 @end example
 
 @item -bt device:@var{dev}[,vlan=@var{n}]
@@ -3315,14 +3318,14 @@ ETEXI
 
 DEF("realtime", HAS_ARG, QEMU_OPTION_realtime,
     "-realtime [mlock=on|off]\n"
-    "                run qemu with realtime features\n"
+    "                run qemu-kvm with realtime features\n"
     "                mlock=on|off controls mlock support (default: on)\n",
     QEMU_ARCH_ALL)
 STEXI
 @item -realtime mlock=on|off
 @findex -realtime
-Run qemu with realtime features.
-mlocking qemu and guest memory can be enabled via @option{mlock=on}
+Run qemu-kvm with realtime features.
+mlocking qemu-kvm and guest memory can be enabled via @option{mlock=on}
 (enabled by default).
 ETEXI
 
@@ -3336,7 +3339,7 @@ connections will likely be TCP-based, but also UDP, pseudo TTY, or even
 stdio are reasonable use case. The latter is allowing to start QEMU from
 within gdb and establish the connection via a pipe:
 @example
-(gdb) target remote | exec qemu-system-i386 -gdb stdio ...
+(gdb) target remote | exec qemu-kvm -gdb stdio ...
 @end example
 ETEXI
 
@@ -4046,6 +4049,13 @@ requires an alignment different than the default one used by QEMU, eg
 the device DAX /dev/dax0.0 requires 2M alignment rather than 4K. In
 such cases, users can specify the required alignment via this option.
 
+The @option{pmem} option specifies whether the backing file specified
+by @option{mem-path} is in host persistent memory that can be accessed
+using the SNIA NVM programming model (e.g. Intel NVDIMM).
+If @option{pmem} is set to 'on', QEMU will take necessary operations to
+guarantee the persistence of its own writes to @option{mem-path}
+(e.g. in vNVDIMM label emulation and live migration).
+
 @item -object memory-backend-ram,id=@var{id},merge=@var{on|off},dump=@var{on|off},share=@var{on|off},prealloc=@var{on|off},size=@var{size},host-nodes=@var{host-nodes},policy=@var{default|preferred|bind|interleave}
 
 Creates a memory backend object, which can be used to back the guest RAM.
@@ -4256,7 +4266,7 @@ which specify the queue number of cryptodev backend, the default of
 
 @example
 
- # qemu-system-x86_64 \
+ # qemu-kvm \
    [...] \
        -object cryptodev-backend-builtin,id=cryptodev0 \
        -device virtio-crypto-pci,id=crypto0,cryptodev=cryptodev0 \
@@ -4276,7 +4286,7 @@ of cryptodev backend for multiqueue vhost-user, the default of @var{queues} is 1
 
 @example
 
- # qemu-system-x86_64 \
+ # qemu-kvm \
    [...] \
        -chardev socket,id=chardev0,path=/path/to/socket \
        -object cryptodev-vhost-user,id=cryptodev0,chardev=chardev0 \

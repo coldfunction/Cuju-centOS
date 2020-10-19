@@ -494,6 +494,12 @@ int kvm_arch_put_registers(CPUState *cs, int level)
         cs->kvm_run->kvm_dirty_regs |= KVM_SYNC_BPBC;
     }
 
+    if (can_sync_regs(cs, KVM_SYNC_ETOKEN)) {
+        cs->kvm_run->s.regs.etoken = env->etoken;
+        cs->kvm_run->s.regs.etoken_extension  = env->etoken_extension;
+        cs->kvm_run->kvm_dirty_regs |= KVM_SYNC_ETOKEN;
+    }
+
     /* Finally the prefix */
     if (can_sync_regs(cs, KVM_SYNC_PREFIX)) {
         cs->kvm_run->s.regs.prefix = env->psa;
@@ -606,6 +612,11 @@ int kvm_arch_get_registers(CPUState *cs)
 
     if (can_sync_regs(cs, KVM_SYNC_BPBC)) {
         env->bpbc = cs->kvm_run->s.regs.bpbc;
+    }
+
+    if (can_sync_regs(cs, KVM_SYNC_ETOKEN)) {
+        env->etoken = cs->kvm_run->s.regs.etoken;
+        env->etoken_extension = cs->kvm_run->s.regs.etoken_extension;
     }
 
     /* pfault parameters */
@@ -2285,6 +2296,14 @@ void kvm_s390_apply_cpu_model(const S390CPUModel *model, Error **errp)
         error_setg(errp, "KVM doesn't support CPU models");
         return;
     }
+
+    /* Older CPU models are not supported on Red Hat Enterprise Linux */
+    if (model->def->gen < 11) {
+        error_setg(errp, "KVM: Unsupported CPU type specified: %s",
+                   MACHINE(qdev_get_machine())->cpu_type);
+        return;
+    }
+
     prop.cpuid = s390_cpuid_from_cpu_model(model);
     prop.ibc = s390_ibc_from_cpu_model(model);
     /* configure cpu features indicated via STFL(e) */

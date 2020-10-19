@@ -20,13 +20,13 @@ block-obj-$(CONFIG_LIBNFS) += nfs.o
 block-obj-$(CONFIG_CURL) += curl.o
 block-obj-$(CONFIG_RBD) += rbd.o
 block-obj-$(CONFIG_GLUSTERFS) += gluster.o
-block-obj-$(CONFIG_VXHS) += vxhs.o
+#block-obj-$(CONFIG_VXHS) += vxhs.o
 block-obj-$(CONFIG_LIBSSH2) += ssh.o
 block-obj-y += accounting.o dirty-bitmap.o
 block-obj-y += write-threshold.o
 block-obj-y += backup.o
 block-obj-$(CONFIG_REPLICATION) += replication.o
-block-obj-y += throttle.o
+block-obj-y += throttle.o copy-on-read.o
 
 block-obj-y += crypto.o
 

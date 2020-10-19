@@ -183,6 +183,9 @@ static void acpi_get_pm_info(AcpiPmInfo *pm)
         pm->fadt.reset_reg = r;
         pm->fadt.reset_val = 0xf;
         pm->fadt.flags |= 1 << ACPI_FADT_F_RESET_REG_SUP;
+        if (object_property_get_bool(lpc,
+                                     "__com.redhat_force-rev1-fadt", NULL))
+            pm->fadt.rev = 1;
         pm->cpu_hp_io_base = ICH9_CPU_HOTPLUG_IO_BASE;
     }
     assert(obj);
@@ -198,21 +201,21 @@ static void acpi_get_pm_info(AcpiPmInfo *pm)
     } else {
         pm->s3_disabled = false;
     }
-    qobject_decref(o);
+    qobject_unref(o);
     o = object_property_get_qobject(obj, ACPI_PM_PROP_S4_DISABLED, NULL);
     if (o) {
         pm->s4_disabled = qnum_get_uint(qobject_to(QNum, o));
     } else {
         pm->s4_disabled = false;
     }
-    qobject_decref(o);
+    qobject_unref(o);
     o = object_property_get_qobject(obj, ACPI_PM_PROP_S4_VAL, NULL);
     if (o) {
         pm->s4_val = qnum_get_uint(qobject_to(QNum, o));
     } else {
         pm->s4_val = false;
     }
-    qobject_decref(o);
+    qobject_unref(o);
 
     pm->pcihp_bridge_en =
         object_property_get_bool(obj, "acpi-pci-hotplug-with-bridge-support",
@@ -570,7 +573,7 @@ static void build_append_pci_bus_devices(Aml *parent_scope, PCIBus *bus,
         }
     }
     aml_append(parent_scope, method);
-    qobject_decref(bsel);
+    qobject_unref(bsel);
 }
 
 /**
@@ -2250,55 +2253,6 @@ build_tpm2(GArray *table_data, BIOSLinker *linker, GArray *tcpalog)
 #define HOLE_640K_START  (640 * 1024)
 #define HOLE_640K_END   (1024 * 1024)
 
-static void build_srat_hotpluggable_memory(GArray *table_data, uint64_t base,
-                                           uint64_t len, int default_node)
-{
-    MemoryDeviceInfoList *info_list = qmp_pc_dimm_device_list();
-    MemoryDeviceInfoList *info;
-    MemoryDeviceInfo *mi;
-    PCDIMMDeviceInfo *di;
-    uint64_t end = base + len, cur, size;
-    bool is_nvdimm;
-    AcpiSratMemoryAffinity *numamem;
-    MemoryAffinityFlags flags;
-
-    for (cur = base, info = info_list;
-         cur < end;
-         cur += size, info = info->next) {
-        numamem = acpi_data_push(table_data, sizeof *numamem);
-
-        if (!info) {
-            build_srat_memory(numamem, cur, end - cur, default_node,
-                              MEM_AFFINITY_HOTPLUGGABLE | MEM_AFFINITY_ENABLED);
-            break;
-        }
-
-        mi = info->value;
-        is_nvdimm = (mi->type == MEMORY_DEVICE_INFO_KIND_NVDIMM);
-        di = !is_nvdimm ? mi->u.dimm.data : mi->u.nvdimm.data;
-
-        if (cur < di->addr) {
-            build_srat_memory(numamem, cur, di->addr - cur, default_node,
-                              MEM_AFFINITY_HOTPLUGGABLE | MEM_AFFINITY_ENABLED);
-            numamem = acpi_data_push(table_data, sizeof *numamem);
-        }
-
-        size = di->size;
-
-        flags = MEM_AFFINITY_ENABLED;
-        if (di->hotpluggable) {
-            flags |= MEM_AFFINITY_HOTPLUGGABLE;
-        }
-        if (is_nvdimm) {
-            flags |= MEM_AFFINITY_NON_VOLATILE;
-        }
-
-        build_srat_memory(numamem, di->addr, size, di->node, flags);
-    }
-
-    qapi_free_MemoryDeviceInfoList(info_list);
-}
-
 static void
 build_srat(GArray *table_data, BIOSLinker *linker, MachineState *machine)
 {
@@ -2405,14 +2359,16 @@ build_srat(GArray *table_data, BIOSLinker *linker, MachineState *machine)
      * Entry is required for Windows to enable memory hotplug in OS
      * and for Linux to enable SWIOTLB when booted with less than
      * 4G of RAM. Windows works better if the entry sets proximity
-     * to the highest NUMA node in the machine.
+     * to the highest NUMA node in the machine at the end of the
+     * reserved space.
      * Memory devices may override proximity set by this entry,
      * providing _PXM method if necessary.
      */
     if (hotplugabble_address_space_size) {
-        build_srat_hotpluggable_memory(table_data, pcms->hotplug_memory.base,
-                                       hotplugabble_address_space_size,
-                                       pcms->numa_nodes - 1);
+        numamem = acpi_data_push(table_data, sizeof *numamem);
+        build_srat_memory(numamem, pcms->hotplug_memory.base,
+                          hotplugabble_address_space_size, pcms->numa_nodes - 1,
+                          MEM_AFFINITY_HOTPLUGGABLE | MEM_AFFINITY_ENABLED);
     }
 
     build_header(linker, table_data,
@@ -2614,12 +2570,12 @@ static bool acpi_get_mcfg(AcpiMcfgInfo *mcfg)
         return false;
     }
     mcfg->mcfg_base = qnum_get_uint(qobject_to(QNum, o));
-    qobject_decref(o);
+    qobject_unref(o);
 
     o = object_property_get_qobject(pci_host, PCIE_HOST_MCFG_SIZE, NULL);
     assert(o);
     mcfg->mcfg_size = qnum_get_uint(qobject_to(QNum, o));
-    qobject_decref(o);
+    qobject_unref(o);
     return true;
 }
 

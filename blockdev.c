@@ -35,6 +35,7 @@
 #include "sysemu/blockdev.h"
 #include "hw/block/block.h"
 #include "block/blockjob.h"
+#include "block/qdict.h"
 #include "block/throttle-groups.h"
 #include "monitor/monitor.h"
 #include "qemu/error-report.h"
@@ -150,7 +151,7 @@ void blockdev_mark_auto_del(BlockBackend *blk)
         aio_context_acquire(aio_context);
 
         if (bs->job) {
-            block_job_cancel(bs->job, false);
+            job_cancel(&bs->job->job, false);
         }
 
         aio_context_release(aio_context);
@@ -460,6 +461,47 @@ static void extract_common_blockdev_options(QemuOpts *opts, int *bdrv_flags,
     }
 }
 
+/**
+ * libvirt expects to be able to pass cache options for CDROM drives without
+ * inserted media. Historically, QEMU eventually ignores these cache options as
+ * they are lost when media is inserted. Recently, QEMU started rejecting these
+ * configurations. Libvirt however still generates such configurations.
+ *
+ * To prevent QEMU from being unable to start, pretend there are no options
+ * present if the only options present are cache options for the BDS.
+ */
+static bool __redhat_com_has_bs_opts(QDict *bs_opts)
+{
+    size_t n, s;
+    s = qdict_size(bs_opts);
+
+    if (s == 0) {
+        return false;
+    } else if (s > 2) {
+        return true;
+    }
+
+    n = qdict_haskey(bs_opts, BDRV_OPT_CACHE_DIRECT);
+    n += qdict_haskey(bs_opts, BDRV_OPT_CACHE_NO_FLUSH);
+
+    return s != n;
+}
+
+/**
+ * libvirt expects to be able to pass io driver options (aio=native) for CDROM
+ * drives without inserted media. While this has worked historically, given the
+ * above workaround and lack of a supported alternative in current versions of
+ * libvirt, certain options such as aio=native cannot be supported as it
+ * requires the use of an accompanying cache option, which we also ignore.
+ * Until libvirt learns how to supply cache options to inserted media, ignore
+ * the aio= preference on empty CDROMs with the understanding that un-tuned
+ * performance is preferable to being unable to use the CDROM at all.
+ */
+static int __redhat_com_filter_flags(int flags)
+{
+    return flags & ~BDRV_O_NATIVE_AIO;
+}
+
 /* Takes the ownership of bs_opts */
 static BlockBackend *blockdev_init(const char *file, QDict *bs_opts,
                                    Error **errp)
@@ -567,16 +609,16 @@ static BlockBackend *blockdev_init(const char *file, QDict *bs_opts,
     read_only = qemu_opt_get_bool(opts, BDRV_OPT_READ_ONLY, false);
 
     /* init */
-    if ((!file || !*file) && !qdict_size(bs_opts)) {
+    if ((!file || !*file) && !__redhat_com_has_bs_opts(bs_opts)) {
         BlockBackendRootState *blk_rs;
 
         blk = blk_new(0, BLK_PERM_ALL);
         blk_rs = blk_get_root_state(blk);
-        blk_rs->open_flags    = bdrv_flags;
+        blk_rs->open_flags    = __redhat_com_filter_flags(bdrv_flags);
         blk_rs->read_only     = read_only;
         blk_rs->detect_zeroes = detect_zeroes;
 
-        QDECREF(bs_opts);
+        qobject_unref(bs_opts);
     } else {
         if (file && !*file) {
             file = NULL;
@@ -589,6 +631,7 @@ static BlockBackend *blockdev_init(const char *file, QDict *bs_opts,
         qdict_set_default_str(bs_opts, BDRV_OPT_CACHE_NO_FLUSH, "off");
         qdict_set_default_str(bs_opts, BDRV_OPT_READ_ONLY,
                               read_only ? "on" : "off");
+        qdict_set_default_str(bs_opts, BDRV_OPT_AUTO_READ_ONLY, "on");
         assert((bdrv_flags & BDRV_O_CACHE_MASK) == 0);
 
         if (runstate_check(RUN_STATE_INMIGRATE)) {
@@ -632,16 +675,16 @@ static BlockBackend *blockdev_init(const char *file, QDict *bs_opts,
 
 err_no_bs_opts:
     qemu_opts_del(opts);
-    QDECREF(interval_dict);
-    QDECREF(interval_list);
+    qobject_unref(interval_dict);
+    qobject_unref(interval_list);
     return blk;
 
 early_err:
     qemu_opts_del(opts);
-    QDECREF(interval_dict);
-    QDECREF(interval_list);
+    qobject_unref(interval_dict);
+    qobject_unref(interval_list);
 err_no_opts:
-    QDECREF(bs_opts);
+    qobject_unref(bs_opts);
     return NULL;
 }
 
@@ -1130,7 +1173,7 @@ DriveInfo *drive_new(QemuOpts *all_opts, BlockInterfaceType block_default_type)
 
 fail:
     qemu_opts_del(legacy_opts);
-    QDECREF(bs_opts);
+    qobject_unref(bs_opts);
     return dinfo;
 }
 
@@ -1364,7 +1407,6 @@ out_aio_context:
  * @node: The name of the BDS node to search for bitmaps
  * @name: The name of the bitmap to search for
  * @pbs: Output pointer for BDS lookup, if desired. Can be NULL.
- * @paio: Output pointer for aio_context acquisition, if desired. Can be NULL.
  * @errp: Output pointer for error information. Can be NULL.
  *
  * @return: A bitmap object on success, or NULL on failure.
@@ -1446,9 +1488,9 @@ typedef struct BlkActionOps {
 struct BlkActionState {
     TransactionAction *action;
     const BlkActionOps *ops;
-    BlockJobTxn *block_job_txn;
+    JobTxn *block_job_txn;
     TransactionProperties *txn_props;
-    QSIMPLEQ_ENTRY(BlkActionState) entry;
+    QTAILQ_ENTRY(BlkActionState) entry;
 };
 
 /* internal snapshot private data */
@@ -1864,7 +1906,7 @@ typedef struct DriveBackupState {
     BlockJob *job;
 } DriveBackupState;
 
-static BlockJob *do_drive_backup(DriveBackup *backup, BlockJobTxn *txn,
+static BlockJob *do_drive_backup(DriveBackup *backup, JobTxn *txn,
                             Error **errp);
 
 static void drive_backup_prepare(BlkActionState *common, Error **errp)
@@ -1910,7 +1952,7 @@ static void drive_backup_commit(BlkActionState *common)
     aio_context_acquire(aio_context);
 
     assert(state->job);
-    block_job_start(state->job);
+    job_start(&state->job->job);
 
     aio_context_release(aio_context);
 }
@@ -1925,7 +1967,7 @@ static void drive_backup_abort(BlkActionState *common)
         aio_context = bdrv_get_aio_context(state->bs);
         aio_context_acquire(aio_context);
 
-        block_job_cancel_sync(state->job);
+        job_cancel_sync(&state->job->job);
 
         aio_context_release(aio_context);
     }
@@ -1954,7 +1996,7 @@ typedef struct BlockdevBackupState {
     BlockJob *job;
 } BlockdevBackupState;
 
-static BlockJob *do_blockdev_backup(BlockdevBackup *backup, BlockJobTxn *txn,
+static BlockJob *do_blockdev_backup(BlockdevBackup *backup, JobTxn *txn,
                                     Error **errp);
 
 static void blockdev_backup_prepare(BlkActionState *common, Error **errp)
@@ -1968,7 +2010,7 @@ static void blockdev_backup_prepare(BlkActionState *common, Error **errp)
     assert(common->action->type == TRANSACTION_ACTION_KIND_BLOCKDEV_BACKUP);
     backup = common->action->u.blockdev_backup.data;
 
-    bs = qmp_get_root_bs(backup->device, errp);
+    bs = bdrv_lookup_bs(backup->device, backup->device, errp);
     if (!bs) {
         return;
     }
@@ -2008,7 +2050,7 @@ static void blockdev_backup_commit(BlkActionState *common)
     aio_context_acquire(aio_context);
 
     assert(state->job);
-    block_job_start(state->job);
+    job_start(&state->job->job);
 
     aio_context_release(aio_context);
 }
@@ -2023,7 +2065,7 @@ static void blockdev_backup_abort(BlkActionState *common)
         aio_context = bdrv_get_aio_context(state->bs);
         aio_context_acquire(aio_context);
 
-        block_job_cancel_sync(state->job);
+        job_cancel_sync(&state->job->job);
 
         aio_context_release(aio_context);
     }
@@ -2052,6 +2094,7 @@ typedef struct BlockDirtyBitmapState {
     BlockDriverState *bs;
     HBitmap *backup;
     bool prepared;
+    bool was_enabled;
 } BlockDirtyBitmapState;
 
 static void block_dirty_bitmap_add_prepare(BlkActionState *common,
@@ -2072,6 +2115,7 @@ static void block_dirty_bitmap_add_prepare(BlkActionState *common,
                                action->has_granularity, action->granularity,
                                action->has_persistent, action->persistent,
                                action->has_autoload, action->autoload,
+                               action->has_disabled, action->disabled,
                                &local_err);
 
     if (!local_err) {
@@ -2116,39 +2160,129 @@ static void block_dirty_bitmap_clear_prepare(BlkActionState *common,
         return;
     }
 
-    if (bdrv_dirty_bitmap_frozen(state->bitmap)) {
-        error_setg(errp, "Cannot modify a frozen bitmap");
-        return;
-    } else if (bdrv_dirty_bitmap_qmp_locked(state->bitmap)) {
-        error_setg(errp, "Cannot modify a locked bitmap");
-        return;
-    } else if (!bdrv_dirty_bitmap_enabled(state->bitmap)) {
-        error_setg(errp, "Cannot clear a disabled bitmap");
-        return;
-    } else if (bdrv_dirty_bitmap_readonly(state->bitmap)) {
-        error_setg(errp, "Cannot clear a readonly bitmap");
+    if (bdrv_dirty_bitmap_check(state->bitmap, BDRV_BITMAP_DEFAULT, errp)) {
         return;
     }
 
     bdrv_clear_dirty_bitmap(state->bitmap, &state->backup);
 }
 
-static void block_dirty_bitmap_clear_abort(BlkActionState *common)
+static void block_dirty_bitmap_restore(BlkActionState *common)
 {
     BlockDirtyBitmapState *state = DO_UPCAST(BlockDirtyBitmapState,
                                              common, common);
 
     if (state->backup) {
-        bdrv_undo_clear_dirty_bitmap(state->bitmap, state->backup);
+        bdrv_restore_dirty_bitmap(state->bitmap, state->backup);
     }
 }
 
-static void block_dirty_bitmap_clear_commit(BlkActionState *common)
+static void block_dirty_bitmap_free_backup(BlkActionState *common)
 {
     BlockDirtyBitmapState *state = DO_UPCAST(BlockDirtyBitmapState,
                                              common, common);
 
     hbitmap_free(state->backup);
+}
+
+static void block_dirty_bitmap_enable_prepare(BlkActionState *common,
+                                              Error **errp)
+{
+    BlockDirtyBitmap *action;
+    BlockDirtyBitmapState *state = DO_UPCAST(BlockDirtyBitmapState,
+                                             common, common);
+
+    if (action_check_completion_mode(common, errp) < 0) {
+        return;
+    }
+
+    action = common->action->u.block_dirty_bitmap_enable.data;
+    state->bitmap = block_dirty_bitmap_lookup(action->node,
+                                              action->name,
+                                              NULL,
+                                              errp);
+    if (!state->bitmap) {
+        return;
+    }
+
+    if (bdrv_dirty_bitmap_check(state->bitmap, BDRV_BITMAP_ALLOW_RO, errp)) {
+        return;
+    }
+
+    state->was_enabled = bdrv_dirty_bitmap_enabled(state->bitmap);
+    bdrv_enable_dirty_bitmap(state->bitmap);
+}
+
+static void block_dirty_bitmap_enable_abort(BlkActionState *common)
+{
+    BlockDirtyBitmapState *state = DO_UPCAST(BlockDirtyBitmapState,
+                                             common, common);
+
+    if (!state->was_enabled) {
+        bdrv_disable_dirty_bitmap(state->bitmap);
+    }
+}
+
+static void block_dirty_bitmap_disable_prepare(BlkActionState *common,
+                                               Error **errp)
+{
+    BlockDirtyBitmap *action;
+    BlockDirtyBitmapState *state = DO_UPCAST(BlockDirtyBitmapState,
+                                             common, common);
+
+    if (action_check_completion_mode(common, errp) < 0) {
+        return;
+    }
+
+    action = common->action->u.block_dirty_bitmap_disable.data;
+    state->bitmap = block_dirty_bitmap_lookup(action->node,
+                                              action->name,
+                                              NULL,
+                                              errp);
+    if (!state->bitmap) {
+        return;
+    }
+
+    if (bdrv_dirty_bitmap_check(state->bitmap, BDRV_BITMAP_ALLOW_RO, errp)) {
+        return;
+    }
+
+    state->was_enabled = bdrv_dirty_bitmap_enabled(state->bitmap);
+    bdrv_disable_dirty_bitmap(state->bitmap);
+}
+
+static void block_dirty_bitmap_disable_abort(BlkActionState *common)
+{
+    BlockDirtyBitmapState *state = DO_UPCAST(BlockDirtyBitmapState,
+                                             common, common);
+
+    if (state->was_enabled) {
+        bdrv_enable_dirty_bitmap(state->bitmap);
+    }
+}
+
+static BdrvDirtyBitmap *do_block_dirty_bitmap_merge(const char *node,
+                                                    const char *target,
+                                                    strList *bitmaps,
+                                                    HBitmap **backup,
+                                                    Error **errp);
+
+static void block_dirty_bitmap_merge_prepare(BlkActionState *common,
+                                             Error **errp)
+{
+    BlockDirtyBitmapMerge *action;
+    BlockDirtyBitmapState *state = DO_UPCAST(BlockDirtyBitmapState,
+                                             common, common);
+
+    if (action_check_completion_mode(common, errp) < 0) {
+        return;
+    }
+
+    action = common->action->u.block_dirty_bitmap_merge.data;
+
+    state->bitmap = do_block_dirty_bitmap_merge(action->node, action->target,
+                                                action->bitmaps, &state->backup,
+                                                errp);
 }
 
 static void abort_prepare(BlkActionState *common, Error **errp)
@@ -2209,9 +2343,31 @@ static const BlkActionOps actions[] = {
     [TRANSACTION_ACTION_KIND_BLOCK_DIRTY_BITMAP_CLEAR] = {
         .instance_size = sizeof(BlockDirtyBitmapState),
         .prepare = block_dirty_bitmap_clear_prepare,
-        .commit = block_dirty_bitmap_clear_commit,
-        .abort = block_dirty_bitmap_clear_abort,
-    }
+        .commit = block_dirty_bitmap_free_backup,
+        .abort = block_dirty_bitmap_restore,
+    },
+    [TRANSACTION_ACTION_KIND_BLOCK_DIRTY_BITMAP_ENABLE] = {
+        .instance_size = sizeof(BlockDirtyBitmapState),
+        .prepare = block_dirty_bitmap_enable_prepare,
+        .abort = block_dirty_bitmap_enable_abort,
+    },
+    [TRANSACTION_ACTION_KIND_BLOCK_DIRTY_BITMAP_DISABLE] = {
+        .instance_size = sizeof(BlockDirtyBitmapState),
+        .prepare = block_dirty_bitmap_disable_prepare,
+        .abort = block_dirty_bitmap_disable_abort,
+    },
+    [TRANSACTION_ACTION_KIND_BLOCK_DIRTY_BITMAP_MERGE] = {
+        .instance_size = sizeof(BlockDirtyBitmapState),
+        .prepare = block_dirty_bitmap_merge_prepare,
+        .commit = block_dirty_bitmap_free_backup,
+        .abort = block_dirty_bitmap_restore,
+    },
+    /* Where are transactions for MIRROR, COMMIT and STREAM?
+     * Although these blockjobs use transaction callbacks like the backup job,
+     * these jobs do not necessarily adhere to transaction semantics.
+     * These jobs may not fully undo all of their actions on abort, nor do they
+     * necessarily work in transactions with more than one job in them.
+     */
 };
 
 /**
@@ -2243,19 +2399,19 @@ void qmp_transaction(TransactionActionList *dev_list,
                      Error **errp)
 {
     TransactionActionList *dev_entry = dev_list;
-    BlockJobTxn *block_job_txn = NULL;
+    JobTxn *block_job_txn = NULL;
     BlkActionState *state, *next;
     Error *local_err = NULL;
 
-    QSIMPLEQ_HEAD(snap_bdrv_states, BlkActionState) snap_bdrv_states;
-    QSIMPLEQ_INIT(&snap_bdrv_states);
+    QTAILQ_HEAD(snap_bdrv_states, BlkActionState) snap_bdrv_states;
+    QTAILQ_INIT(&snap_bdrv_states);
 
     /* Does this transaction get canceled as a group on failure?
-     * If not, we don't really need to make a BlockJobTxn.
+     * If not, we don't really need to make a JobTxn.
      */
     props = get_transaction_properties(props);
     if (props->completion_mode != ACTION_COMPLETION_MODE_INDIVIDUAL) {
-        block_job_txn = block_job_txn_new();
+        block_job_txn = job_txn_new();
     }
 
     /* drain all i/o before any operations */
@@ -2279,7 +2435,7 @@ void qmp_transaction(TransactionActionList *dev_list,
         state->action = dev_info;
         state->block_job_txn = block_job_txn;
         state->txn_props = props;
-        QSIMPLEQ_INSERT_TAIL(&snap_bdrv_states, state, entry);
+        QTAILQ_INSERT_TAIL(&snap_bdrv_states, state, entry);
 
         state->ops->prepare(state, &local_err);
         if (local_err) {
@@ -2288,7 +2444,7 @@ void qmp_transaction(TransactionActionList *dev_list,
         }
     }
 
-    QSIMPLEQ_FOREACH(state, &snap_bdrv_states, entry) {
+    QTAILQ_FOREACH(state, &snap_bdrv_states, entry) {
         if (state->ops->commit) {
             state->ops->commit(state);
         }
@@ -2299,13 +2455,13 @@ void qmp_transaction(TransactionActionList *dev_list,
 
 delete_and_fail:
     /* failure, and it is all-or-none; roll back all operations */
-    QSIMPLEQ_FOREACH(state, &snap_bdrv_states, entry) {
+    QTAILQ_FOREACH_REVERSE(state, &snap_bdrv_states, snap_bdrv_states, entry) {
         if (state->ops->abort) {
             state->ops->abort(state);
         }
     }
 exit:
-    QSIMPLEQ_FOREACH_SAFE(state, &snap_bdrv_states, entry, next) {
+    QTAILQ_FOREACH_SAFE(state, &snap_bdrv_states, entry, next) {
         if (state->ops->clean) {
             state->ops->clean(state);
         }
@@ -2314,7 +2470,7 @@ exit:
     if (!has_props) {
         qapi_free_TransactionProperties(props);
     }
-    block_job_txn_unref(block_job_txn);
+    job_txn_unref(block_job_txn);
 }
 
 void qmp_eject(bool has_device, const char *device,
@@ -2630,7 +2786,7 @@ void qmp_blockdev_change_medium(bool has_device, const char *device,
 
     bdrv_flags = blk_get_open_flags_from_root_state(blk);
     bdrv_flags &= ~(BDRV_O_TEMPORARY | BDRV_O_SNAPSHOT | BDRV_O_NO_BACKING |
-        BDRV_O_PROTOCOL);
+        BDRV_O_PROTOCOL | BDRV_O_AUTO_RDONLY);
 
     if (!has_read_only) {
         read_only = BLOCKDEV_CHANGE_READ_ONLY_MODE_RETAIN;
@@ -2801,10 +2957,12 @@ void qmp_block_dirty_bitmap_add(const char *node, const char *name,
                                 bool has_granularity, uint32_t granularity,
                                 bool has_persistent, bool persistent,
                                 bool has_autoload, bool autoload,
+                                bool has_disabled, bool disabled,
                                 Error **errp)
 {
     BlockDriverState *bs;
     BdrvDirtyBitmap *bitmap;
+    AioContext *aio_context = NULL;
 
     if (!name || name[0] == '\0') {
         error_setg(errp, "Bitmap name cannot be empty");
@@ -2835,18 +2993,32 @@ void qmp_block_dirty_bitmap_add(const char *node, const char *name,
         warn_report("Autoload option is deprecated and its value is ignored");
     }
 
-    if (persistent &&
-        !bdrv_can_store_new_dirty_bitmap(bs, name, granularity, errp))
-    {
-        return;
+    if (!has_disabled) {
+        disabled = false;
+    }
+
+    if (persistent) {
+        aio_context = bdrv_get_aio_context(bs);
+        aio_context_acquire(aio_context);
+        if (!bdrv_can_store_new_dirty_bitmap(bs, name, granularity, errp)) {
+            goto out;
+        }
     }
 
     bitmap = bdrv_create_dirty_bitmap(bs, granularity, name, errp);
     if (bitmap == NULL) {
-        return;
+        goto out;
     }
 
-    bdrv_dirty_bitmap_set_persistance(bitmap, persistent);
+    if (disabled) {
+        bdrv_disable_dirty_bitmap(bitmap);
+    }
+
+    bdrv_dirty_bitmap_set_persistence(bitmap, persistent);
+ out:
+    if (aio_context) {
+        aio_context_release(aio_context);
+    }
 }
 
 void qmp_block_dirty_bitmap_remove(const char *node, const char *name,
@@ -2855,34 +3027,33 @@ void qmp_block_dirty_bitmap_remove(const char *node, const char *name,
     BlockDriverState *bs;
     BdrvDirtyBitmap *bitmap;
     Error *local_err = NULL;
+    AioContext *aio_context = NULL;
 
     bitmap = block_dirty_bitmap_lookup(node, name, &bs, errp);
     if (!bitmap || !bs) {
         return;
     }
 
-    if (bdrv_dirty_bitmap_frozen(bitmap)) {
-        error_setg(errp,
-                   "Bitmap '%s' is currently frozen and cannot be removed",
-                   name);
-        return;
-    } else if (bdrv_dirty_bitmap_qmp_locked(bitmap)) {
-        error_setg(errp,
-                   "Bitmap '%s' is currently locked and cannot be removed",
-                   name);
+    if (bdrv_dirty_bitmap_check(bitmap, BDRV_BITMAP_BUSY | BDRV_BITMAP_RO,
+                                errp)) {
         return;
     }
 
-    if (bdrv_dirty_bitmap_get_persistance(bitmap)) {
+    if (bdrv_dirty_bitmap_get_persistence(bitmap)) {
+        aio_context = bdrv_get_aio_context(bs);
+        aio_context_acquire(aio_context);
         bdrv_remove_persistent_dirty_bitmap(bs, name, &local_err);
         if (local_err != NULL) {
             error_propagate(errp, local_err);
-            return;
+            goto out;
         }
     }
 
-    bdrv_dirty_bitmap_make_anon(bitmap);
     bdrv_release_dirty_bitmap(bs, bitmap);
+ out:
+    if (aio_context) {
+        aio_context_release(aio_context);
+    }
 }
 
 /**
@@ -2900,27 +3071,99 @@ void qmp_block_dirty_bitmap_clear(const char *node, const char *name,
         return;
     }
 
-    if (bdrv_dirty_bitmap_frozen(bitmap)) {
-        error_setg(errp,
-                   "Bitmap '%s' is currently frozen and cannot be modified",
-                   name);
-        return;
-    } else if (bdrv_dirty_bitmap_qmp_locked(bitmap)) {
-        error_setg(errp,
-                   "Bitmap '%s' is currently locked and cannot be modified",
-                   name);
-        return;
-    } else if (!bdrv_dirty_bitmap_enabled(bitmap)) {
-        error_setg(errp,
-                   "Bitmap '%s' is currently disabled and cannot be cleared",
-                   name);
-        return;
-    } else if (bdrv_dirty_bitmap_readonly(bitmap)) {
-        error_setg(errp, "Bitmap '%s' is readonly and cannot be cleared", name);
+    if (bdrv_dirty_bitmap_check(bitmap, BDRV_BITMAP_DEFAULT, errp)) {
         return;
     }
 
     bdrv_clear_dirty_bitmap(bitmap, NULL);
+}
+
+void qmp_block_dirty_bitmap_enable(const char *node, const char *name,
+                                   Error **errp)
+{
+    BlockDriverState *bs;
+    BdrvDirtyBitmap *bitmap;
+
+    bitmap = block_dirty_bitmap_lookup(node, name, &bs, errp);
+    if (!bitmap) {
+        return;
+    }
+
+    if (bdrv_dirty_bitmap_check(bitmap, BDRV_BITMAP_ALLOW_RO, errp)) {
+        return;
+    }
+
+    bdrv_enable_dirty_bitmap(bitmap);
+}
+
+void qmp_block_dirty_bitmap_disable(const char *node, const char *name,
+                                    Error **errp)
+{
+    BlockDriverState *bs;
+    BdrvDirtyBitmap *bitmap;
+
+    bitmap = block_dirty_bitmap_lookup(node, name, &bs, errp);
+    if (!bitmap) {
+        return;
+    }
+
+    if (bdrv_dirty_bitmap_check(bitmap, BDRV_BITMAP_ALLOW_RO, errp)) {
+        return;
+    }
+
+    bdrv_disable_dirty_bitmap(bitmap);
+}
+
+static BdrvDirtyBitmap *do_block_dirty_bitmap_merge(const char *node,
+                                                    const char *target,
+                                                    strList *bitmaps,
+                                                    HBitmap **backup,
+                                                    Error **errp)
+{
+    BlockDriverState *bs;
+    BdrvDirtyBitmap *dst, *src, *anon;
+    strList *lst;
+    Error *local_err = NULL;
+
+    dst = block_dirty_bitmap_lookup(node, target, &bs, errp);
+    if (!dst) {
+        return NULL;
+    }
+
+    anon = bdrv_create_dirty_bitmap(bs, bdrv_dirty_bitmap_granularity(dst),
+                                    NULL, errp);
+    if (!anon) {
+        return NULL;
+    }
+
+    for (lst = bitmaps; lst; lst = lst->next) {
+        src = bdrv_find_dirty_bitmap(bs, lst->value);
+        if (!src) {
+            error_setg(errp, "Dirty bitmap '%s' not found", lst->value);
+            dst = NULL;
+            goto out;
+        }
+
+        bdrv_merge_dirty_bitmap(anon, src, NULL, &local_err);
+        if (local_err) {
+            error_propagate(errp, local_err);
+            dst = NULL;
+            goto out;
+        }
+    }
+
+    /* Merge into dst; dst is unchanged on failure. */
+    bdrv_merge_dirty_bitmap(dst, anon, backup, errp);
+
+ out:
+    bdrv_release_dirty_bitmap(bs, anon);
+    return dst;
+}
+
+void qmp_block_dirty_bitmap_merge(const char *node, const char *target,
+                                  strList *bitmaps, Error **errp)
+{
+    do_block_dirty_bitmap_merge(node, target, bitmaps, NULL, errp);
 }
 
 BlockDirtyBitmapSha256 *qmp_x_debug_block_dirty_bitmap_sha256(const char *node,
@@ -2948,32 +3191,28 @@ BlockDirtyBitmapSha256 *qmp_x_debug_block_dirty_bitmap_sha256(const char *node,
     return ret;
 }
 
-void hmp_drive_del(Monitor *mon, const QDict *qdict)
+void qmp___com_redhat_drive_del(const char *id, Error **errp)
 {
-    const char *id = qdict_get_str(qdict, "id");
     BlockBackend *blk;
     BlockDriverState *bs;
     AioContext *aio_context;
-    Error *local_err = NULL;
 
     bs = bdrv_find_node(id);
     if (bs) {
-        qmp_blockdev_del(id, &local_err);
-        if (local_err) {
-            error_report_err(local_err);
-        }
+        qmp_blockdev_del(id, errp);
         return;
     }
 
     blk = blk_by_name(id);
     if (!blk) {
-        error_report("Device '%s' not found", id);
+        error_set(errp, ERROR_CLASS_DEVICE_NOT_FOUND,
+                  "Device '%s' not found", id);
         return;
     }
 
     if (!blk_legacy_dinfo(blk)) {
-        error_report("Deleting device added with blockdev-add"
-                     " is not supported");
+        error_setg(errp, "Deleting device added with blockdev-add"
+                         " is not supported");
         return;
     }
 
@@ -2982,8 +3221,7 @@ void hmp_drive_del(Monitor *mon, const QDict *qdict)
 
     bs = blk_bs(blk);
     if (bs) {
-        if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_DRIVE_DEL, &local_err)) {
-            error_report_err(local_err);
+        if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_DRIVE_DEL, errp)) {
             aio_context_release(aio_context);
             return;
         }
@@ -3006,6 +3244,16 @@ void hmp_drive_del(Monitor *mon, const QDict *qdict)
     }
 
     aio_context_release(aio_context);
+}
+
+void hmp_drive_del(Monitor *mon, const QDict *qdict)
+{
+    Error *local_err = NULL;
+
+    qmp___com_redhat_drive_del(qdict_get_str(qdict, "id"), &local_err);
+    if (local_err) {
+        error_report_err(local_err);
+    }
 }
 
 void qmp_block_resize(bool has_device, const char *device,
@@ -3065,6 +3313,8 @@ void qmp_block_stream(bool has_job_id, const char *job_id, const char *device,
                       bool has_backing_file, const char *backing_file,
                       bool has_speed, int64_t speed,
                       bool has_on_error, BlockdevOnError on_error,
+                      bool has_auto_finalize, bool auto_finalize,
+                      bool has_auto_dismiss, bool auto_dismiss,
                       Error **errp)
 {
     BlockDriverState *bs, *iter;
@@ -3072,6 +3322,7 @@ void qmp_block_stream(bool has_job_id, const char *job_id, const char *device,
     AioContext *aio_context;
     Error *local_err = NULL;
     const char *base_name = NULL;
+    int job_flags = JOB_DEFAULT;
 
     if (!has_on_error) {
         on_error = BLOCKDEV_ON_ERROR_REPORT;
@@ -3133,8 +3384,15 @@ void qmp_block_stream(bool has_job_id, const char *job_id, const char *device,
     /* backing_file string overrides base bs filename */
     base_name = has_backing_file ? backing_file : base_name;
 
+    if (has_auto_finalize && !auto_finalize) {
+        job_flags |= JOB_MANUAL_FINALIZE;
+    }
+    if (has_auto_dismiss && !auto_dismiss) {
+        job_flags |= JOB_MANUAL_DISMISS;
+    }
+
     stream_start(has_job_id ? job_id : NULL, bs, base_bs, base_name,
-                 has_speed ? speed : 0, on_error, &local_err);
+                 job_flags, has_speed ? speed : 0, on_error, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
         goto out;
@@ -3147,11 +3405,15 @@ out:
 }
 
 void qmp_block_commit(bool has_job_id, const char *job_id, const char *device,
+                      bool has_base_node, const char *base_node,
                       bool has_base, const char *base,
+                      bool has_top_node, const char *top_node,
                       bool has_top, const char *top,
                       bool has_backing_file, const char *backing_file,
                       bool has_speed, int64_t speed,
                       bool has_filter_node_name, const char *filter_node_name,
+                      bool has_auto_finalize, bool auto_finalize,
+                      bool has_auto_dismiss, bool auto_dismiss,
                       Error **errp)
 {
     BlockDriverState *bs;
@@ -3163,12 +3425,19 @@ void qmp_block_commit(bool has_job_id, const char *job_id, const char *device,
      * BlockdevOnError change for blkmirror makes it in
      */
     BlockdevOnError on_error = BLOCKDEV_ON_ERROR_REPORT;
+    int job_flags = JOB_DEFAULT;
 
     if (!has_speed) {
         speed = 0;
     }
     if (!has_filter_node_name) {
         filter_node_name = NULL;
+    }
+    if (has_auto_finalize && !auto_finalize) {
+        job_flags |= JOB_MANUAL_FINALIZE;
+    }
+    if (has_auto_dismiss && !auto_dismiss) {
+        job_flags |= JOB_MANUAL_DISMISS;
     }
 
     /* Important Note:
@@ -3199,7 +3468,20 @@ void qmp_block_commit(bool has_job_id, const char *job_id, const char *device,
     /* default top_bs is the active layer */
     top_bs = bs;
 
-    if (has_top && top) {
+    if (has_top_node && has_top) {
+        error_setg(errp, "'top-node' and 'top' are mutually exclusive");
+        goto out;
+    } else if (has_top_node) {
+        top_bs = bdrv_lookup_bs(NULL, top_node, errp);
+        if (top_bs == NULL) {
+            goto out;
+        }
+        if (!bdrv_chain_contains(bs, top_bs)) {
+            error_setg(errp, "'%s' is not in this backing file chain",
+                       top_node);
+            goto out;
+        }
+    } else if (has_top && top) {
         if (strcmp(bs->filename, top) != 0) {
             top_bs = bdrv_find_backing_image(bs, top);
         }
@@ -3212,7 +3494,20 @@ void qmp_block_commit(bool has_job_id, const char *job_id, const char *device,
 
     assert(bdrv_get_aio_context(top_bs) == aio_context);
 
-    if (has_base && base) {
+    if (has_base_node && has_base) {
+        error_setg(errp, "'base-node' and 'base' are mutually exclusive");
+        goto out;
+    } else if (has_base_node) {
+        base_bs = bdrv_lookup_bs(NULL, base_node, errp);
+        if (base_bs == NULL) {
+            goto out;
+        }
+        if (!bdrv_chain_contains(top_bs, base_bs)) {
+            error_setg(errp, "'%s' is not in this backing file chain",
+                       base_node);
+            goto out;
+        }
+    } else if (has_base && base) {
         base_bs = bdrv_find_backing_image(top_bs, base);
     } else {
         base_bs = bdrv_find_base(top_bs);
@@ -3244,15 +3539,15 @@ void qmp_block_commit(bool has_job_id, const char *job_id, const char *device,
             goto out;
         }
         commit_active_start(has_job_id ? job_id : NULL, bs, base_bs,
-                            BLOCK_JOB_DEFAULT, speed, on_error,
+                            job_flags, speed, on_error,
                             filter_node_name, NULL, NULL, false, &local_err);
     } else {
         BlockDriverState *overlay_bs = bdrv_find_overlay(bs, top_bs);
         if (bdrv_op_is_blocked(overlay_bs, BLOCK_OP_TYPE_COMMIT_TARGET, errp)) {
             goto out;
         }
-        commit_start(has_job_id ? job_id : NULL, bs, base_bs, top_bs, speed,
-                     on_error, has_backing_file ? backing_file : NULL,
+        commit_start(has_job_id ? job_id : NULL, bs, base_bs, top_bs, job_flags,
+                     speed, on_error, has_backing_file ? backing_file : NULL,
                      filter_node_name, &local_err);
     }
     if (local_err != NULL) {
@@ -3264,7 +3559,7 @@ out:
     aio_context_release(aio_context);
 }
 
-static BlockJob *do_drive_backup(DriveBackup *backup, BlockJobTxn *txn,
+static BlockJob *do_drive_backup(DriveBackup *backup, JobTxn *txn,
                                  Error **errp)
 {
     BlockDriverState *bs;
@@ -3275,7 +3570,7 @@ static BlockJob *do_drive_backup(DriveBackup *backup, BlockJobTxn *txn,
     AioContext *aio_context;
     QDict *options = NULL;
     Error *local_err = NULL;
-    int flags, job_flags = BLOCK_JOB_DEFAULT;
+    int flags, job_flags = JOB_DEFAULT;
     int64_t size;
     bool set_backing_hd = false;
 
@@ -3378,8 +3673,7 @@ static BlockJob *do_drive_backup(DriveBackup *backup, BlockJobTxn *txn,
     if (set_backing_hd) {
         bdrv_set_backing_hd(target_bs, source, &local_err);
         if (local_err) {
-            bdrv_unref(target_bs);
-            goto out;
+            goto unref;
         }
     }
 
@@ -3387,33 +3681,30 @@ static BlockJob *do_drive_backup(DriveBackup *backup, BlockJobTxn *txn,
         bmap = bdrv_find_dirty_bitmap(bs, backup->bitmap);
         if (!bmap) {
             error_setg(errp, "Bitmap '%s' could not be found", backup->bitmap);
-            bdrv_unref(target_bs);
-            goto out;
+            goto unref;
         }
-        if (bdrv_dirty_bitmap_qmp_locked(bmap)) {
-            error_setg(errp,
-                       "Bitmap '%s' is currently locked and cannot be used for "
-                       "backup", backup->bitmap);
-            goto out;
+        if (bdrv_dirty_bitmap_check(bmap, BDRV_BITMAP_DEFAULT, errp)) {
+            goto unref;
         }
     }
     if (!backup->auto_finalize) {
-        job_flags |= BLOCK_JOB_MANUAL_FINALIZE;
+        job_flags |= JOB_MANUAL_FINALIZE;
     }
     if (!backup->auto_dismiss) {
-        job_flags |= BLOCK_JOB_MANUAL_DISMISS;
+        job_flags |= JOB_MANUAL_DISMISS;
     }
 
     job = backup_job_create(backup->job_id, bs, target_bs, backup->speed,
                             backup->sync, bmap, backup->compress,
                             backup->on_source_error, backup->on_target_error,
                             job_flags, NULL, NULL, txn, &local_err);
-    bdrv_unref(target_bs);
     if (local_err != NULL) {
         error_propagate(errp, local_err);
-        goto out;
+        goto unref;
     }
 
+unref:
+    bdrv_unref(target_bs);
 out:
     aio_context_release(aio_context);
     return job;
@@ -3425,7 +3716,7 @@ void qmp_drive_backup(DriveBackup *arg, Error **errp)
     BlockJob *job;
     job = do_drive_backup(arg, NULL, errp);
     if (job) {
-        block_job_start(job);
+        job_start(&job->job);
     }
 }
 
@@ -3434,15 +3725,16 @@ BlockDeviceInfoList *qmp_query_named_block_nodes(Error **errp)
     return bdrv_named_nodes_list(errp);
 }
 
-BlockJob *do_blockdev_backup(BlockdevBackup *backup, BlockJobTxn *txn,
+BlockJob *do_blockdev_backup(BlockdevBackup *backup, JobTxn *txn,
                              Error **errp)
 {
     BlockDriverState *bs;
     BlockDriverState *target_bs;
     Error *local_err = NULL;
+    BdrvDirtyBitmap *bmap = NULL;
     AioContext *aio_context;
     BlockJob *job = NULL;
-    int job_flags = BLOCK_JOB_DEFAULT;
+    int job_flags = JOB_DEFAULT;
 
     if (!backup->has_speed) {
         backup->speed = 0;
@@ -3466,7 +3758,7 @@ BlockJob *do_blockdev_backup(BlockdevBackup *backup, BlockJobTxn *txn,
         backup->compress = false;
     }
 
-    bs = qmp_get_root_bs(backup->device, errp);
+    bs = bdrv_lookup_bs(backup->device, backup->device, errp);
     if (!bs) {
         return NULL;
     }
@@ -3490,14 +3782,24 @@ BlockJob *do_blockdev_backup(BlockdevBackup *backup, BlockJobTxn *txn,
             goto out;
         }
     }
+    if (backup->has_bitmap) {
+        bmap = bdrv_find_dirty_bitmap(bs, backup->bitmap);
+        if (!bmap) {
+            error_setg(errp, "Bitmap '%s' could not be found", backup->bitmap);
+            goto out;
+        }
+        if (bdrv_dirty_bitmap_check(bmap, BDRV_BITMAP_DEFAULT, errp)) {
+            goto out;
+        }
+    }
     if (!backup->auto_finalize) {
-        job_flags |= BLOCK_JOB_MANUAL_FINALIZE;
+        job_flags |= JOB_MANUAL_FINALIZE;
     }
     if (!backup->auto_dismiss) {
-        job_flags |= BLOCK_JOB_MANUAL_DISMISS;
+        job_flags |= JOB_MANUAL_DISMISS;
     }
     job = backup_job_create(backup->job_id, bs, target_bs, backup->speed,
-                            backup->sync, NULL, backup->compress,
+                            backup->sync, bmap, backup->compress,
                             backup->on_source_error, backup->on_target_error,
                             job_flags, NULL, NULL, txn, &local_err);
     if (local_err != NULL) {
@@ -3513,7 +3815,7 @@ void qmp_blockdev_backup(BlockdevBackup *arg, Error **errp)
     BlockJob *job;
     job = do_blockdev_backup(arg, NULL, errp);
     if (job) {
-        block_job_start(job);
+        job_start(&job->job);
     }
 }
 
@@ -3535,8 +3837,11 @@ static void blockdev_mirror_common(const char *job_id, BlockDriverState *bs,
                                    bool has_unmap, bool unmap,
                                    bool has_filter_node_name,
                                    const char *filter_node_name,
+                                   bool has_auto_finalize, bool auto_finalize,
+                                   bool has_auto_dismiss, bool auto_dismiss,
                                    Error **errp)
 {
+    int job_flags = JOB_DEFAULT;
 
     if (!has_speed) {
         speed = 0;
@@ -3558,6 +3863,12 @@ static void blockdev_mirror_common(const char *job_id, BlockDriverState *bs,
     }
     if (!has_filter_node_name) {
         filter_node_name = NULL;
+    }
+    if (has_auto_finalize && !auto_finalize) {
+        job_flags |= JOB_MANUAL_FINALIZE;
+    }
+    if (has_auto_dismiss && !auto_dismiss) {
+        job_flags |= JOB_MANUAL_DISMISS;
     }
 
     if (granularity != 0 && (granularity < 512 || granularity > 1048576 * 64)) {
@@ -3586,7 +3897,7 @@ static void blockdev_mirror_common(const char *job_id, BlockDriverState *bs,
      * and will allow to check whether the node still exist at mirror completion
      */
     mirror_start(job_id, bs, target,
-                 has_replaces ? replaces : NULL,
+                 has_replaces ? replaces : NULL, job_flags,
                  speed, granularity, buf_size, sync, backing_mode,
                  on_source_error, on_target_error, unmap, filter_node_name,
                  errp);
@@ -3735,6 +4046,8 @@ void qmp_drive_mirror(DriveMirror *arg, Error **errp)
                            arg->has_on_target_error, arg->on_target_error,
                            arg->has_unmap, arg->unmap,
                            false, NULL,
+                           arg->has_auto_finalize, arg->auto_finalize,
+                           arg->has_auto_dismiss, arg->auto_dismiss,
                            &local_err);
     bdrv_unref(target_bs);
     error_propagate(errp, local_err);
@@ -3755,6 +4068,8 @@ void qmp_blockdev_mirror(bool has_job_id, const char *job_id,
                          BlockdevOnError on_target_error,
                          bool has_filter_node_name,
                          const char *filter_node_name,
+                         bool has_auto_finalize, bool auto_finalize,
+                         bool has_auto_dismiss, bool auto_dismiss,
                          Error **errp)
 {
     BlockDriverState *bs;
@@ -3787,6 +4102,8 @@ void qmp_blockdev_mirror(bool has_job_id, const char *job_id,
                            has_on_target_error, on_target_error,
                            true, true,
                            has_filter_node_name, filter_node_name,
+                           has_auto_finalize, auto_finalize,
+                           has_auto_dismiss, auto_dismiss,
                            &local_err);
     error_propagate(errp, local_err);
 
@@ -3844,14 +4161,14 @@ void qmp_block_job_cancel(const char *device,
         force = false;
     }
 
-    if (block_job_user_paused(job) && !force) {
+    if (job_user_paused(&job->job) && !force) {
         error_setg(errp, "The block job for device '%s' is currently paused",
                    device);
         goto out;
     }
 
     trace_qmp_block_job_cancel(job);
-    block_job_user_cancel(job, force, errp);
+    job_user_cancel(&job->job, force, errp);
 out:
     aio_context_release(aio_context);
 }
@@ -3866,7 +4183,7 @@ void qmp_block_job_pause(const char *device, Error **errp)
     }
 
     trace_qmp_block_job_pause(job);
-    block_job_user_pause(job, errp);
+    job_user_pause(&job->job, errp);
     aio_context_release(aio_context);
 }
 
@@ -3880,7 +4197,7 @@ void qmp_block_job_resume(const char *device, Error **errp)
     }
 
     trace_qmp_block_job_resume(job);
-    block_job_user_resume(job, errp);
+    job_user_resume(&job->job, errp);
     aio_context_release(aio_context);
 }
 
@@ -3894,7 +4211,7 @@ void qmp_block_job_complete(const char *device, Error **errp)
     }
 
     trace_qmp_block_job_complete(job);
-    block_job_complete(job, errp);
+    job_complete(&job->job, errp);
     aio_context_release(aio_context);
 }
 
@@ -3908,21 +4225,23 @@ void qmp_block_job_finalize(const char *id, Error **errp)
     }
 
     trace_qmp_block_job_finalize(job);
-    block_job_finalize(job, errp);
+    job_finalize(&job->job, errp);
     aio_context_release(aio_context);
 }
 
 void qmp_block_job_dismiss(const char *id, Error **errp)
 {
     AioContext *aio_context;
-    BlockJob *job = find_block_job(id, &aio_context, errp);
+    BlockJob *bjob = find_block_job(id, &aio_context, errp);
+    Job *job;
 
-    if (!job) {
+    if (!bjob) {
         return;
     }
 
-    trace_qmp_block_job_dismiss(job);
-    block_job_dismiss(&job, errp);
+    trace_qmp_block_job_dismiss(bjob);
+    job = &bjob->job;
+    job_dismiss(&job, errp);
     aio_context_release(aio_context);
 }
 
@@ -4022,7 +4341,7 @@ void hmp_drive_add_node(Monitor *mon, const char *optstr)
     qdict = qemu_opts_to_qdict(opts, NULL);
 
     if (!qdict_get_try_str(qdict, "node-name")) {
-        QDECREF(qdict);
+        qobject_unref(qdict);
         error_report("'node-name' needs to be specified");
         goto out;
     }
@@ -4355,4 +4674,18 @@ QemuOptsList qemu_drive_opts = {
          */
         { /* end of list */ }
     },
+};
+
+QemuOptsList qemu_simple_drive_opts = {
+    .name = "simple-drive",
+    .implied_opt_name = "format",
+    .head = QTAILQ_HEAD_INITIALIZER(qemu_simple_drive_opts.head),
+    .desc = {
+        /*
+         * no elements => accept any
+         * sanity checking will happen later
+         * when setting device properties
+         */
+        { /* end if list */ }
+    }
 };

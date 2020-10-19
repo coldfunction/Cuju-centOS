@@ -206,8 +206,8 @@ static void scsi_qdev_realize(DeviceState *qdev, Error **errp)
         error_propagate(errp, local_err);
         return;
     }
-    dev->vmsentry = qemu_add_vm_change_state_handler(scsi_dma_restart_cb,
-                                                     dev);
+    dev->vmsentry = qdev_add_vm_change_state_handler(DEVICE(dev),
+            scsi_dma_restart_cb, dev);
 }
 
 static void scsi_qdev_unrealize(DeviceState *qdev, Error **errp)
@@ -226,6 +226,8 @@ static void scsi_qdev_unrealize(DeviceState *qdev, Error **errp)
 SCSIDevice *scsi_bus_legacy_add_drive(SCSIBus *bus, BlockBackend *blk,
                                       int unit, bool removable, int bootindex,
                                       bool share_rw,
+                                      BlockdevOnError rerror,
+                                      BlockdevOnError werror,
                                       const char *serial, Error **errp)
 {
     const char *driver;
@@ -262,6 +264,10 @@ SCSIDevice *scsi_bus_legacy_add_drive(SCSIBus *bus, BlockBackend *blk,
         object_unparent(OBJECT(dev));
         return NULL;
     }
+
+    qdev_prop_set_enum(dev, "rerror", rerror);
+    qdev_prop_set_enum(dev, "werror", werror);
+
     object_property_set_bool(OBJECT(dev), true, "realized", &err);
     if (err != NULL) {
         error_propagate(errp, err);
@@ -285,7 +291,10 @@ void scsi_bus_legacy_handle_cmdline(SCSIBus *bus)
         }
         qemu_opts_loc_restore(dinfo->opts);
         scsi_bus_legacy_add_drive(bus, blk_by_legacy_dinfo(dinfo),
-                                  unit, false, -1, false, NULL, &error_fatal);
+                                  unit, false, -1, false,
+                                  BLOCKDEV_ON_ERROR_AUTO,
+                                  BLOCKDEV_ON_ERROR_AUTO,
+                                  NULL, &error_fatal);
     }
     loc_pop(&loc);
 }

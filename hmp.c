@@ -942,6 +942,8 @@ void hmp_info_pci(Monitor *mon, const QDict *qdict)
     qapi_free_PciInfoList(info_list);
 }
 
+#ifdef CONFIG_LIVE_BLOCK_OPS
+
 void hmp_info_block_jobs(Monitor *mon, const QDict *qdict)
 {
     BlockJobInfoList *list;
@@ -979,6 +981,8 @@ void hmp_info_block_jobs(Monitor *mon, const QDict *qdict)
 
     qapi_free_BlockJobInfoList(list);
 }
+
+#endif /* CONFIG_LIVE_BLOCK_OPS */
 
 void hmp_info_tpm(Monitor *mon, const QDict *qdict)
 {
@@ -1191,6 +1195,8 @@ void hmp_block_resize(Monitor *mon, const QDict *qdict)
     hmp_handle_error(mon, &err);
 }
 
+#ifdef CONFIG_LIVE_BLOCK_OPS
+
 void hmp_drive_mirror(Monitor *mon, const QDict *qdict)
 {
     const char *filename = qdict_get_str(qdict, "target");
@@ -1273,6 +1279,8 @@ void hmp_snapshot_blkdev(Monitor *mon, const QDict *qdict)
                                true, mode, &err);
     hmp_handle_error(mon, &err);
 }
+
+#endif /* CONFIG_LIVE_BLOCK_OPS */
 
 void hmp_snapshot_blkdev_internal(Monitor *mon, const QDict *qdict)
 {
@@ -1789,6 +1797,8 @@ void hmp_block_set_io_throttle(Monitor *mon, const QDict *qdict)
     hmp_handle_error(mon, &err);
 }
 
+#ifdef CONFIG_LIVE_BLOCK_OPS
+
 void hmp_block_stream(Monitor *mon, const QDict *qdict)
 {
     Error *error = NULL;
@@ -1797,8 +1807,9 @@ void hmp_block_stream(Monitor *mon, const QDict *qdict)
     int64_t speed = qdict_get_try_int(qdict, "speed", 0);
 
     qmp_block_stream(true, device, device, base != NULL, base, false, NULL,
-                     false, NULL, qdict_haskey(qdict, "speed"), speed,
-                     true, BLOCKDEV_ON_ERROR_REPORT, &error);
+                     false, NULL, qdict_haskey(qdict, "speed"), speed, true,
+                     BLOCKDEV_ON_ERROR_REPORT, false, false, false, false,
+                     &error);
 
     hmp_handle_error(mon, &error);
 }
@@ -1854,6 +1865,8 @@ void hmp_block_job_complete(Monitor *mon, const QDict *qdict)
 
     hmp_handle_error(mon, &error);
 }
+
+#endif /* CONFIG_LIVE_BLOCK_OPS */
 
 typedef struct HMPMigrationStatus
 {
@@ -2148,6 +2161,16 @@ void hmp_screendump(Monitor *mon, const QDict *qdict)
     hmp_handle_error(mon, &err);
 }
 
+void hmp___com_redhat_qxl_screen_dump(Monitor *mon, const QDict *qdict)
+{
+    const char *id = qdict_get_str(qdict, "id");
+    const char *filename = qdict_get_str(qdict, "filename");
+    Error *err = NULL;
+
+    qmp___com_redhat_qxl_screendump(id, filename, &err);
+    hmp_handle_error(mon, &err);
+}
+
 void hmp_nbd_server_start(Monitor *mon, const QDict *qdict)
 {
     const char *uri = qdict_get_str(qdict, "uri");
@@ -2189,7 +2212,7 @@ void hmp_nbd_server_start(Monitor *mon, const QDict *qdict)
         }
 
         qmp_nbd_server_add(info->value->device, false, NULL,
-                           true, writable, &local_err);
+                           true, writable, false, NULL, &local_err);
 
         if (local_err != NULL) {
             qmp_nbd_server_stop(NULL);
@@ -2210,7 +2233,8 @@ void hmp_nbd_server_add(Monitor *mon, const QDict *qdict)
     bool writable = qdict_get_try_bool(qdict, "writable", false);
     Error *local_err = NULL;
 
-    qmp_nbd_server_add(device, !!name, name, true, writable, &local_err);
+    qmp_nbd_server_add(device, !!name, name, true, writable,
+                       false, NULL, &local_err);
     hmp_handle_error(mon, &local_err);
 }
 

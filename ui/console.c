@@ -373,6 +373,31 @@ void qmp_screendump(const char *filename, bool has_device, const char *device,
     ppm_save(filename, surface, errp);
 }
 
+void qmp___com_redhat_qxl_screendump(const char *id, const char *filename, Error **errp);
+void qmp___com_redhat_qxl_screendump(const char *id, const char *filename, Error **errp)
+{
+    DeviceState *dev;
+    QemuConsole *con;
+    DisplaySurface *surface;
+
+    dev = qdev_find_recursive(sysbus_get_default(), id);
+    if (NULL == dev) {
+        error_set(errp, ERROR_CLASS_DEVICE_NOT_FOUND,
+                  "Device '%s' not found", id);
+        return;
+    }
+
+    con = qemu_console_lookup_by_device(dev, 0);
+    if (con == NULL) {
+        error_setg(errp, "Device %s has no QemuConsole attached to it.", id);
+        return;
+    }
+
+    graphic_hw_update(con);
+    surface = qemu_console_surface(con);
+    ppm_save(filename, surface, errp);
+}
+
 void graphic_hw_text_update(QemuConsole *con, console_ch_t *chardata)
 {
     if (!con) {
@@ -1280,7 +1305,7 @@ static QemuConsole *new_console(DisplayState *ds, console_type_t console_type,
     object_property_add_link(obj, "device", TYPE_DEVICE,
                              (Object **)&s->device,
                              object_property_allow_set_link,
-                             OBJ_PROP_LINK_UNREF_ON_RELEASE,
+                             OBJ_PROP_LINK_STRONG,
                              &error_abort);
     object_property_add_uint32_ptr(obj, "head",
                                    &s->head, &error_abort);

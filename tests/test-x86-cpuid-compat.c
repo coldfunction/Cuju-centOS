@@ -19,7 +19,7 @@ static char *get_cpu0_qom_path(void)
 
     cpu0 = qobject_to(QDict, qlist_peek(ret));
     path = g_strdup(qdict_get_str(cpu0, "qom_path"));
-    QDECREF(resp);
+    qobject_unref(resp);
     return path;
 }
 
@@ -30,8 +30,8 @@ static QObject *qom_get(const char *path, const char *prop)
                       "                 'property': %s } }",
                       path, prop);
     QObject *ret = qdict_get(resp, "return");
-    qobject_incref(ret);
-    QDECREF(resp);
+    qobject_ref(ret);
+    qobject_unref(resp);
     return ret;
 }
 
@@ -41,7 +41,7 @@ static bool qom_get_bool(const char *path, const char *prop)
     QBool *value = qobject_to(QBool, qom_get(path, prop));
     bool b = qbool_get_bool(value);
 
-    QDECREF(value);
+    qobject_unref(value);
     return b;
 }
 #endif
@@ -66,7 +66,7 @@ static void test_cpuid_prop(const void *data)
     g_assert_cmpint(val, ==, args->expected_value);
     qtest_end();
 
-    QDECREF(value);
+    qobject_unref(value);
     g_free(path);
 }
 
@@ -142,8 +142,8 @@ static void test_feature_flag(const void *data)
 
     g_assert(!!(value & (1U << args->bitnr)) == args->expected_value);
 
-    QDECREF(present);
-    QDECREF(filtered);
+    qobject_unref(present);
+    qobject_unref(filtered);
     g_free(path);
 }
 
@@ -306,6 +306,7 @@ int main(int argc, char **argv)
                    "-cpu 486,xlevel2=0xC0000002,+xstore",
                    "xlevel2", 0xC0000002);
 
+#if 0 /* Disabled in Red Hat Enterprise Linux */
     /* Check compatibility of old machine-types that didn't
      * auto-increase level/xlevel/xlevel2: */
 
@@ -356,6 +357,7 @@ int main(int argc, char **argv)
     add_cpuid_test("x86/cpuid/xlevel-compat/pc-i440fx-2.4/npt-on",
                    "-machine pc-i440fx-2.4 -cpu SandyBridge,+npt",
                    "xlevel", 0x80000008);
+#endif
 
     /* Test feature parsing */
     add_feature_test("x86/cpuid/features/plus",

@@ -16,7 +16,9 @@
 #include "libqtest.h"
 
 static const char *blacklist_x86[] = {
-    "xenfv", "xenpv", NULL
+    "xenfv", "xenpv", "isapc",
+    "rhel6.6.0", "rhel6.5.0", "rhel6.4.0", "rhel6.3.0",
+    "rhel6.2.0", "rhel6.1.0", "rhel6.0.0", NULL
 };
 
 static const struct {
@@ -57,7 +59,7 @@ static void test_properties(const char *path, bool recurse)
     g_assert(response);
 
     if (!recurse) {
-        QDECREF(response);
+        qobject_unref(response);
         return;
     }
 
@@ -82,10 +84,10 @@ static void test_properties(const char *path, bool recurse)
                       path, prop);
             /* qom-get may fail but should not, e.g., segfault. */
             g_assert(tmp);
-            QDECREF(tmp);
+            qobject_unref(tmp);
         }
     }
-    QDECREF(response);
+    qobject_unref(response);
 }
 
 static void test_machine(gconstpointer data)
@@ -101,7 +103,7 @@ static void test_machine(gconstpointer data)
 
     response = qmp("{ 'execute': 'quit' }");
     g_assert(qdict_haskey(response, "return"));
-    QDECREF(response);
+    qobject_unref(response);
 
     qtest_end();
     g_free(args);

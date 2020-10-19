@@ -36,8 +36,7 @@ static void nbd_accept(QIONetListener *listener, QIOChannelSocket *cioc,
                        gpointer opaque)
 {
     qio_channel_set_name(QIO_CHANNEL(cioc), "nbd-server");
-    nbd_client_new(NULL, cioc,
-                   nbd_server->tlscreds, NULL,
+    nbd_client_new(cioc, nbd_server->tlscreds, NULL,
                    nbd_blockdev_client_closed);
 }
 
@@ -141,11 +140,13 @@ void qmp_nbd_server_start(SocketAddressLegacy *addr,
 }
 
 void qmp_nbd_server_add(const char *device, bool has_name, const char *name,
-                        bool has_writable, bool writable, Error **errp)
+                        bool has_writable, bool writable,
+                        bool has_bitmap, const char *bitmap, Error **errp)
 {
     BlockDriverState *bs = NULL;
     BlockBackend *on_eject_blk;
     NBDExport *exp;
+    int64_t len;
 
     if (!nbd_server) {
         error_setg(errp, "NBD server not running");
@@ -168,6 +169,13 @@ void qmp_nbd_server_add(const char *device, bool has_name, const char *name,
         return;
     }
 
+    len = bdrv_getlength(bs);
+    if (len < 0) {
+        error_setg_errno(errp, -len,
+                         "Failed to determine the NBD export's length");
+        return;
+    }
+
     if (!has_writable) {
         writable = false;
     }
@@ -175,13 +183,12 @@ void qmp_nbd_server_add(const char *device, bool has_name, const char *name,
         writable = false;
     }
 
-    exp = nbd_export_new(bs, 0, -1, writable ? 0 : NBD_FLAG_READ_ONLY,
+    exp = nbd_export_new(bs, 0, len, name, NULL, bitmap,
+                         writable ? 0 : NBD_FLAG_READ_ONLY,
                          NULL, false, on_eject_blk, errp);
     if (!exp) {
         return;
     }
-
-    nbd_export_set_name(exp, name);
 
     /* The list of named exports has a strong reference to this export now and
      * our only way of accessing it is through nbd_export_find(), so we can drop
@@ -215,6 +222,11 @@ void qmp_nbd_server_remove(const char *name,
 
 void qmp_nbd_server_stop(Error **errp)
 {
+    if (!nbd_server) {
+        error_setg(errp, "NBD server not running");
+        return;
+    }
+
     nbd_export_close_all();
 
     nbd_server_free(nbd_server);

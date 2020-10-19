@@ -35,6 +35,7 @@
 #include "qapi/error.h"
 
 #define MSIX_CAP_LENGTH 12
+#define MAX_DEV_ASSIGN_CMDLINE 32
 
 static void vfio_disable_interrupts(VFIOPCIDevice *vdev);
 static void vfio_mmap_set_enabled(VFIOPCIDevice *vdev, bool enabled);
@@ -989,7 +990,6 @@ static void vfio_pci_size_rom(VFIOPCIDevice *vdev)
     pci_register_bar(&vdev->pdev, PCI_ROM_SLOT,
                      PCI_BASE_ADDRESS_SPACE_MEMORY, &vdev->pdev.rom);
 
-    vdev->pdev.has_rom = true;
     vdev->rom_read_failed = false;
 }
 
@@ -2802,12 +2802,25 @@ static void vfio_realize(PCIDevice *pdev, Error **errp)
     VFIOPCIDevice *vdev = DO_UPCAST(VFIOPCIDevice, pdev, pdev);
     VFIODevice *vbasedev_iter;
     VFIOGroup *group;
-    char *tmp, group_path[PATH_MAX], *group_name;
+    char *tmp, *subsys, group_path[PATH_MAX], *group_name;
     Error *err = NULL;
     ssize_t len;
     struct stat st;
     int groupid;
-    int i, ret;
+    int ret, i = 0;
+    bool is_mdev;
+
+    QLIST_FOREACH(group, &vfio_group_list, next) {
+        QLIST_FOREACH(vbasedev_iter, &group->device_list, next) {
+            i++;
+        }
+    }
+
+    if (i >= MAX_DEV_ASSIGN_CMDLINE) {
+        error_setg(errp, "Maximum supported vfio devices (%d) "
+                     "already attached", MAX_DEV_ASSIGN_CMDLINE);
+        return;
+    }
 
     if (!vdev->vbasedev.sysfsdev) {
         if (!(~vdev->host.domain || ~vdev->host.bus ||
@@ -2865,6 +2878,27 @@ static void vfio_realize(PCIDevice *pdev, Error **errp)
             vfio_put_group(group);
             goto error;
         }
+    }
+
+    /*
+     * Mediated devices *might* operate compatibly with memory ballooning, but
+     * we cannot know for certain, it depends on whether the mdev vendor driver
+     * stays in sync with the active working set of the guest driver.  Prevent
+     * the x-balloon-allowed option unless this is minimally an mdev device.
+     */
+    tmp = g_strdup_printf("%s/subsystem", vdev->vbasedev.sysfsdev);
+    subsys = realpath(tmp, NULL);
+    g_free(tmp);
+    is_mdev = subsys && (strcmp(subsys, "/sys/bus/mdev") == 0);
+    free(subsys);
+
+    trace_vfio_mdev(vdev->vbasedev.name, is_mdev);
+
+    if (vdev->vbasedev.balloon_allowed && !is_mdev) {
+        error_setg(errp, "x-balloon-allowed only potentially compatible "
+                   "with mdev devices");
+        vfio_put_group(group);
+        goto error;
     }
 
     ret = vfio_get_device(group, vdev->vbasedev.name, &vdev->vbasedev, errp);
@@ -3154,7 +3188,7 @@ static Property vfio_pci_dev_properties[] = {
     DEFINE_PROP_PCI_HOST_DEVADDR("host", VFIOPCIDevice, host),
     DEFINE_PROP_STRING("sysfsdev", VFIOPCIDevice, vbasedev.sysfsdev),
     DEFINE_PROP_ON_OFF_AUTO("display", VFIOPCIDevice,
-                            display, ON_OFF_AUTO_AUTO),
+                            display, ON_OFF_AUTO_OFF),
     DEFINE_PROP_UINT32("x-intx-mmap-timeout-ms", VFIOPCIDevice,
                        intx.mmap_timeout, 1100),
     DEFINE_PROP_BIT("x-vga", VFIOPCIDevice, features,
@@ -3164,6 +3198,8 @@ static Property vfio_pci_dev_properties[] = {
     DEFINE_PROP_BIT("x-igd-opregion", VFIOPCIDevice, features,
                     VFIO_FEATURE_ENABLE_IGD_OPREGION_BIT, false),
     DEFINE_PROP_BOOL("x-no-mmap", VFIOPCIDevice, vbasedev.no_mmap, false),
+    DEFINE_PROP_BOOL("x-balloon-allowed", VFIOPCIDevice,
+                     vbasedev.balloon_allowed, false),
     DEFINE_PROP_BOOL("x-no-kvm-intx", VFIOPCIDevice, no_kvm_intx, false),
     DEFINE_PROP_BOOL("x-no-kvm-msi", VFIOPCIDevice, no_kvm_msi, false),
     DEFINE_PROP_BOOL("x-no-kvm-msix", VFIOPCIDevice, no_kvm_msix, false),

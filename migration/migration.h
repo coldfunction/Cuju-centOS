@@ -175,13 +175,18 @@ struct MigrationState
      */
     bool store_global_state;
 
-    /* Whether the VM is only allowing for migratable devices */
-    bool only_migratable;
-
     /* Whether we send QEMU_VM_CONFIGURATION during migration */
     bool send_configuration;
     /* Whether we send section footer during migration */
     bool send_section_footer;
+
+    /*
+     * Whether we abort the migration if decompression errors are
+     * detected at the destination. It is left at false for qemu
+     * older than 3.0, since only newer qemu sends streams that
+     * do not trigger spurious decompression errors.
+     */
+    bool decompress_error_check;
 };
 
 void migrate_set_state(int *state, int old_state, int new_state);
@@ -241,5 +246,10 @@ int migrate_send_rp_req_pages(MigrationIncomingState *mis, const char* rbname,
 
 void dirty_bitmap_mig_before_vm_start(void);
 void init_dirty_bitmap_incoming_migration(void);
+/*
+ * Disables a load of subsections that were added in 2.2/rh7.2 for backwards
+ * migration compatibility.
+ */
+extern bool migrate_pre_2_2;
 
 #endif

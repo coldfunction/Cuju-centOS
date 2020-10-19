@@ -159,7 +159,7 @@ fi
 ORIG_TEST_IMG="$TEST_IMG"
 
 if [ -z "$TEST_DIR" ]; then
-        TEST_DIR=`pwd`/scratch
+        TEST_DIR=$PWD/scratch
 fi
 
 QEMU_TEST_DIR="${TEST_DIR}"
@@ -187,6 +187,16 @@ _use_sample_img()
     then
         echo "_use_sample_img error, cannot extract '$SAMPLE_IMG_DIR/$1'"
         exit 1
+    fi
+}
+
+_stop_nbd_server()
+{
+    if [ -f "${QEMU_TEST_DIR}/qemu-nbd.pid" ]; then
+        local QEMU_NBD_PID
+        read QEMU_NBD_PID < "${QEMU_TEST_DIR}/qemu-nbd.pid"
+        kill ${QEMU_NBD_PID}
+        rm -f "${QEMU_TEST_DIR}/qemu-nbd.pid"
     fi
 }
 
@@ -229,6 +239,10 @@ _make_test_img()
         extra_img_options="-o $optstr $extra_img_options"
     fi
 
+    if [ $IMGPROTO = "nbd" ]; then
+        _stop_nbd_server
+    fi
+
     # XXX(hch): have global image options?
     (
      if [ $use_backing = 1 ]; then
@@ -269,12 +283,7 @@ _cleanup_test_img()
     case "$IMGPROTO" in
 
         nbd)
-            if [ -f "${QEMU_TEST_DIR}/qemu-nbd.pid" ]; then
-                local QEMU_NBD_PID
-                read QEMU_NBD_PID < "${QEMU_TEST_DIR}/qemu-nbd.pid"
-                kill ${QEMU_NBD_PID}
-                rm -f "${QEMU_TEST_DIR}/qemu-nbd.pid"
-            fi
+            _stop_nbd_server
             rm -f "$TEST_IMG_FILE"
             ;;
         vxhs)

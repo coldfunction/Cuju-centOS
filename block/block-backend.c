@@ -88,7 +88,6 @@ struct BlockBackend {
      * Accessed with atomic ops.
      */
     unsigned int in_flight;
-    AioWait wait;
 };
 
 typedef struct BlockBackendAIOCB {
@@ -121,6 +120,7 @@ static void blk_root_inherit_options(int *child_flags, QDict *child_options,
     abort();
 }
 static void blk_root_drained_begin(BdrvChild *child);
+static bool blk_root_drained_poll(BdrvChild *child);
 static void blk_root_drained_end(BdrvChild *child);
 
 static void blk_root_change_media(BdrvChild *child, bool load);
@@ -294,6 +294,7 @@ static const BdrvChildRole child_root = {
     .get_parent_desc    = blk_root_get_parent_desc,
 
     .drained_begin      = blk_root_drained_begin,
+    .drained_poll       = blk_root_drained_poll,
     .drained_end        = blk_root_drained_end,
 
     .activate           = blk_root_activate,
@@ -323,6 +324,9 @@ BlockBackend *blk_new(uint64_t perm, uint64_t shared_perm)
     blk->perm = perm;
     blk->shared_perm = shared_perm;
     blk_set_enable_write_cache(blk, true);
+
+    blk->on_read_error = BLOCKDEV_ON_ERROR_REPORT;
+    blk->on_write_error = BLOCKDEV_ON_ERROR_ENOSPC;
 
     block_acct_init(&blk->stats);
 
@@ -434,6 +438,7 @@ int blk_get_refcnt(BlockBackend *blk)
  */
 void blk_ref(BlockBackend *blk)
 {
+    assert(blk->refcnt > 0);
     blk->refcnt++;
 }
 
@@ -446,7 +451,13 @@ void blk_unref(BlockBackend *blk)
 {
     if (blk) {
         assert(blk->refcnt > 0);
-        if (!--blk->refcnt) {
+        if (blk->refcnt > 1) {
+            blk->refcnt--;
+        } else {
+            blk_drain(blk);
+            /* blk_drain() cannot resurrect blk, nobody held a reference */
+            assert(blk->refcnt == 1);
+            blk->refcnt = 0;
             blk_delete(blk);
         }
     }
@@ -768,6 +779,11 @@ void blk_remove_bs(BlockBackend *blk)
 
     blk_update_root_state(blk);
 
+    /* bdrv_root_unref_child() will cause blk->root to become stale and may
+     * switch to a completion coroutine later on. Let's drain all I/O here
+     * to avoid that and a potential QEMU crash.
+     */
+    blk_drain(blk);
     bdrv_root_unref_child(blk->root);
     blk->root = NULL;
 }
@@ -1278,15 +1294,15 @@ int blk_make_zero(BlockBackend *blk, BdrvRequestFlags flags)
     return bdrv_make_zero(blk->root, flags);
 }
 
-static void blk_inc_in_flight(BlockBackend *blk)
+void blk_inc_in_flight(BlockBackend *blk)
 {
     atomic_inc(&blk->in_flight);
 }
 
-static void blk_dec_in_flight(BlockBackend *blk)
+void blk_dec_in_flight(BlockBackend *blk)
 {
     atomic_dec(&blk->in_flight);
-    aio_wait_kick(&blk->wait);
+    aio_wait_kick();
 }
 
 static void error_callback_bh(void *opaque)
@@ -1327,8 +1343,16 @@ static const AIOCBInfo blk_aio_em_aiocb_info = {
 static void blk_aio_complete(BlkAioEmAIOCB *acb)
 {
     if (acb->has_returned) {
-        blk_dec_in_flight(acb->rwco.blk);
+        if (qemu_get_current_aio_context() == qemu_get_aio_context()) {
+            /* If we are in the main thread, the callback is allowed to unref
+             * the BlockBackend, so we have to hold an additional reference */
+            blk_ref(acb->rwco.blk);
+        }
         acb->common.cb(acb->common.opaque, acb->rwco.ret);
+        blk_dec_in_flight(acb->rwco.blk);
+        if (qemu_get_current_aio_context() == qemu_get_aio_context()) {
+            blk_unref(acb->rwco.blk);
+        }
         qemu_aio_unref(acb);
     }
 }
@@ -1587,9 +1611,8 @@ void blk_drain(BlockBackend *blk)
     }
 
     /* We may have -ENOMEDIUM completions in flight */
-    AIO_WAIT_WHILE(&blk->wait,
-            blk_get_aio_context(blk),
-            atomic_mb_read(&blk->in_flight) > 0);
+    AIO_WAIT_WHILE(blk_get_aio_context(blk),
+                   atomic_mb_read(&blk->in_flight) > 0);
 
     if (bs) {
         bdrv_drained_end(bs);
@@ -1608,8 +1631,7 @@ void blk_drain_all(void)
         aio_context_acquire(ctx);
 
         /* We may have -ENOMEDIUM completions in flight */
-        AIO_WAIT_WHILE(&blk->wait, ctx,
-                atomic_mb_read(&blk->in_flight) > 0);
+        AIO_WAIT_WHILE(ctx, atomic_mb_read(&blk->in_flight) > 0);
 
         aio_context_release(ctx);
     }
@@ -1650,9 +1672,25 @@ BlockErrorAction blk_get_error_action(BlockBackend *blk, bool is_read,
     }
 }
 
+/* https://bugzilla.redhat.com/show_bug.cgi?id=1199174 */
+static RHEL7BlockErrorReason get_rhel7_error_reason(int error)
+{
+	switch (error) {
+	case ENOSPC:
+        return RHEL7_BLOCK_ERROR_REASON_ENOSPC;
+	case EPERM:
+        return RHEL7_BLOCK_ERROR_REASON_EPERM;
+	case EIO:
+        return RHEL7_BLOCK_ERROR_REASON_EIO;
+	default:
+        return RHEL7_BLOCK_ERROR_REASON_EOTHER;
+    }
+}
+
 static void send_qmp_error_event(BlockBackend *blk,
                                  BlockErrorAction action,
-                                 bool is_read, int error)
+                                 bool is_read, int error,
+                                 RHEL7BlockErrorReason res)
 {
     IoOperationType optype;
     BlockDriverState *bs = blk_bs(blk);
@@ -1662,7 +1700,7 @@ static void send_qmp_error_event(BlockBackend *blk,
                                    bs ? bdrv_get_node_name(bs) : NULL, optype,
                                    action, blk_iostatus_is_enabled(blk),
                                    error == ENOSPC, strerror(error),
-                                   &error_abort);
+                                   res, &error_abort);
 }
 
 /* This is done by device models because, while the block layer knows
@@ -1672,7 +1710,10 @@ static void send_qmp_error_event(BlockBackend *blk,
 void blk_error_action(BlockBackend *blk, BlockErrorAction action,
                       bool is_read, int error)
 {
+    RHEL7BlockErrorReason res;
+
     assert(error >= 0);
+    res = get_rhel7_error_reason(error);
 
     if (action == BLOCK_ERROR_ACTION_STOP) {
         /* First set the iostatus, so that "info block" returns an iostatus
@@ -1690,10 +1731,10 @@ void blk_error_action(BlockBackend *blk, BlockErrorAction action,
          * also ensures that the STOP/RESUME pair of events is emitted.
          */
         qemu_system_vmstop_request_prepare();
-        send_qmp_error_event(blk, action, is_read, error);
+        send_qmp_error_event(blk, action, is_read, error, res);
         qemu_system_vmstop_request(RUN_STATE_IO_ERROR);
     } else {
-        send_qmp_error_event(blk, action, is_read, error);
+        send_qmp_error_event(blk, action, is_read, error, res);
     }
 }
 
@@ -1791,6 +1832,13 @@ int blk_get_flags(BlockBackend *blk)
     } else {
         return blk->root_state.open_flags;
     }
+}
+
+/* Returns the minimum request alignment, in bytes; guaranteed nonzero */
+uint32_t blk_get_request_alignment(BlockBackend *blk)
+{
+    BlockDriverState *bs = blk_bs(blk);
+    return bs ? bs->bl.request_alignment : BDRV_SECTOR_SIZE;
 }
 
 /* Returns the maximum transfer length, in bytes; guaranteed nonzero */
@@ -2193,6 +2241,13 @@ static void blk_root_drained_begin(BdrvChild *child)
     }
 }
 
+static bool blk_root_drained_poll(BdrvChild *child)
+{
+    BlockBackend *blk = child->opaque;
+    assert(blk->quiesce_counter);
+    return !!blk->in_flight;
+}
+
 static void blk_root_drained_end(BdrvChild *child)
 {
     BlockBackend *blk = child->opaque;
@@ -2216,4 +2271,23 @@ void blk_register_buf(BlockBackend *blk, void *host, size_t size)
 void blk_unregister_buf(BlockBackend *blk, void *host)
 {
     bdrv_unregister_buf(blk_bs(blk), host);
+}
+
+int coroutine_fn blk_co_copy_range(BlockBackend *blk_in, int64_t off_in,
+                                   BlockBackend *blk_out, int64_t off_out,
+                                   int bytes, BdrvRequestFlags read_flags,
+                                   BdrvRequestFlags write_flags)
+{
+    int r;
+    r = blk_check_byte_request(blk_in, off_in, bytes);
+    if (r) {
+        return r;
+    }
+    r = blk_check_byte_request(blk_out, off_out, bytes);
+    if (r) {
+        return r;
+    }
+    return bdrv_co_copy_range(blk_in->root, off_in,
+                              blk_out->root, off_out,
+                              bytes, read_flags, write_flags);
 }

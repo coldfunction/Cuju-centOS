@@ -817,7 +817,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
     RTL8139State *s = qemu_get_nic_opaque(nc);
     PCIDevice *d = PCI_DEVICE(s);
     /* size is the length of the buffer passed to the driver */
-    int size = size_;
+    size_t size = size_;
     const uint8_t *dot1q_buf = NULL;
 
     uint32_t packet_header = 0;
@@ -826,7 +826,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
     static const uint8_t broadcast_macaddr[6] =
         { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 
-    DPRINTF(">>> received len=%d\n", size);
+    DPRINTF(">>> received len=%zu\n", size);
 
     /* test if board clock is stopped */
     if (!s->clock_enabled)
@@ -1035,7 +1035,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
 
         if (size+4 > rx_space)
         {
-            DPRINTF("C+ Rx mode : descriptor %d size %d received %d + 4\n",
+            DPRINTF("C+ Rx mode : descriptor %d size %d received %zu + 4\n",
                 descriptor, rx_space, size);
 
             s->IntrStatus |= RxOverflow;
@@ -1148,7 +1148,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
         if (avail != 0 && RX_ALIGN(size + 8) >= avail)
         {
             DPRINTF("rx overflow: rx buffer length %d head 0x%04x "
-                "read 0x%04x === available 0x%04x need 0x%04x\n",
+                "read 0x%04x === available 0x%04x need 0x%04zx\n",
                 s->RxBufferSize, s->RxBufAddr, s->RxBufPtr, avail, size + 8);
 
             s->IntrStatus |= RxOverflow;
@@ -3174,7 +3174,7 @@ static int rtl8139_pre_save(void *opaque)
 
 static const VMStateDescription vmstate_rtl8139 = {
     .name = "rtl8139",
-    .version_id = 5,
+    .version_id = 4,
     .minimum_version_id = 3,
     .post_load = rtl8139_post_load,
     .pre_save  = rtl8139_pre_save,
@@ -3255,7 +3255,9 @@ static const VMStateDescription vmstate_rtl8139 = {
         VMSTATE_UINT32(tally_counters.TxMCol, RTL8139State),
         VMSTATE_UINT64(tally_counters.RxOkPhy, RTL8139State),
         VMSTATE_UINT64(tally_counters.RxOkBrd, RTL8139State),
+#if 0 /* Disabled for Red Hat Enterprise Linux bz 1420195 */
         VMSTATE_UINT32_V(tally_counters.RxOkMul, RTL8139State, 5),
+#endif
         VMSTATE_UINT16(tally_counters.TxAbt, RTL8139State),
         VMSTATE_UINT16(tally_counters.TxUndrn, RTL8139State),
 
@@ -3425,7 +3427,7 @@ static void rtl8139_class_init(ObjectClass *klass, void *data)
 
     k->realize = pci_rtl8139_realize;
     k->exit = pci_rtl8139_uninit;
-    k->romfile = "efi-rtl8139.rom";
+    k->romfile = "pxe-rtl8139.rom";
     k->vendor_id = PCI_VENDOR_ID_REALTEK;
     k->device_id = PCI_DEVICE_ID_REALTEK_8139;
     k->revision = RTL8139_PCI_REVID; /* >=0x20 is for 8139C+ */

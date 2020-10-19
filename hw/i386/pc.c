@@ -479,12 +479,13 @@ void pc_cmos_init(PCMachineState *pcms,
     rtc_set_memory(s, 0x5b, val);
     rtc_set_memory(s, 0x5c, val >> 8);
     rtc_set_memory(s, 0x5d, val >> 16);
+    rtc_set_memory(s, 0x5e, val >> 24);
 
     object_property_add_link(OBJECT(pcms), "rtc_state",
                              TYPE_ISA_DEVICE,
                              (Object **)&pcms->rtc,
                              object_property_allow_set_link,
-                             OBJ_PROP_LINK_UNREF_ON_RELEASE, &error_abort);
+                             OBJ_PROP_LINK_STRONG, &error_abort);
     object_property_set_link(OBJECT(pcms), OBJECT(s),
                              "rtc_state", &error_abort);
 
@@ -1412,12 +1413,13 @@ void pc_memory_init(PCMachineState *pcms,
     }
 
     /* Initialize PC system firmware */
-    pc_system_firmware_init(rom_memory, !pcmc->pci_enabled);
+    pc_system_firmware_init(pcms, rom_memory);
 
     option_rom_mr = g_malloc(sizeof(*option_rom_mr));
     memory_region_init_ram(option_rom_mr, NULL, "pc.rom", PC_ROM_SIZE,
                            &error_fatal);
-    if (pcmc->pci_enabled) {
+    /* RH difference: See bz 1489800, explicitly make ROM ro */
+    if (pcmc->pc_rom_ro) {
         memory_region_set_readonly(option_rom_mr, true);
     }
     memory_region_add_subregion_overlap(rom_memory,
@@ -1525,8 +1527,9 @@ static void pc_superio_init(ISABus *isa_bus, bool create_fdctrl, bool no_vmport)
     ISADevice *i8042, *port92, *vmmouse;
 
     serial_hds_isa_init(isa_bus, 0, MAX_SERIAL_PORTS);
+#if 0 /* Disabled for Red Hat Enterprise Linux */
     parallel_hds_isa_init(isa_bus, MAX_PARALLEL_PORTS);
-
+#endif
     for (i = 0; i < MAX_FD; i++) {
         fd[i] = drive_get(IF_FLOPPY, 0, i);
         create_fdctrl |= !!fd[i];
@@ -2246,6 +2249,8 @@ static void pc_machine_initfn(Object *obj)
     pcms->smbus = true;
     pcms->sata = true;
     pcms->pit = true;
+
+    pc_system_flash_create(pcms);
 }
 
 static void pc_machine_reset(void)
@@ -2359,6 +2364,7 @@ static void pc_machine_class_init(ObjectClass *oc, void *data)
     pcmc->acpi_data_size = 0x20000 + 0x8000;
     pcmc->save_tsc_khz = true;
     pcmc->linuxboot_dma_enabled = true;
+    pcmc->pc_rom_ro = true;
     mc->get_hotplug_handler = pc_get_hotpug_handler;
     mc->cpu_index_to_instance_props = pc_cpu_index_to_props;
     mc->get_default_cpu_node_id = pc_get_default_cpu_node_id;
@@ -2368,7 +2374,8 @@ static void pc_machine_class_init(ObjectClass *oc, void *data)
     mc->default_boot_order = "cad";
     mc->hot_add_cpu = pc_hot_add_cpu;
     mc->block_default_type = IF_IDE;
-    mc->max_cpus = 255;
+    /* 240: max CPU count for RHEL */
+    mc->max_cpus = 240;
     mc->reset = pc_machine_reset;
     hc->pre_plug = pc_machine_device_pre_plug_cb;
     hc->plug = pc_machine_device_plug_cb;

@@ -1339,6 +1339,8 @@ F: qemu-img*
 F: qemu-io*
 F: tests/qemu-iotests/
 F: util/qemu-progress.c
+F: qobject/block-qdict.c
+F: test/check-block-qdict.c
 T: git git://repo.or.cz/qemu/kevin.git block
 
 Block I/O path
@@ -1369,10 +1371,14 @@ L: qemu-block@nongnu.org
 S: Supported
 F: blockjob.c
 F: include/block/blockjob.h
+F: job.c
+F: job-qmp.c
+F: include/block/job.h
 F: block/backup.c
 F: block/commit.c
 F: block/stream.c
 F: block/mirror.c
+F: qapi/job.json
 T: git git://github.com/codyprime/qemu-kvm-jtc.git block
 
 Block QAPI, monitor, command line
@@ -1781,6 +1787,12 @@ F: include/sysemu/replay.h
 F: docs/replay.txt
 F: stubs/replay.c
 
+IOVA Tree
+M: Peter Xu <peterx@redhat.com>
+S: Maintained
+F: include/qemu/iova-tree.h
+F: util/iova-tree.c
+
 Usermode Emulation
 ------------------
 Overall
@@ -1921,6 +1933,7 @@ F: nbd/
 F: include/block/nbd*
 F: qemu-nbd.*
 F: blockdev-nbd.c
+F: docs/interop/nbd.txt
 T: git git://repo.or.cz/qemu/ericb.git nbd
 
 NFS

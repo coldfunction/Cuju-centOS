@@ -131,7 +131,7 @@ static uint32_t  ahci_port_read(AHCIState *s, int port, int offset)
     return val;
 }
 
-static void ahci_irq_raise(AHCIState *s, AHCIDevice *dev)
+static void ahci_irq_raise(AHCIState *s)
 {
     DeviceState *dev_state = s->container;
     PCIDevice *pci_dev = (PCIDevice *) object_dynamic_cast(OBJECT(dev_state),
@@ -146,7 +146,7 @@ static void ahci_irq_raise(AHCIState *s, AHCIDevice *dev)
     }
 }
 
-static void ahci_irq_lower(AHCIState *s, AHCIDevice *dev)
+static void ahci_irq_lower(AHCIState *s)
 {
     DeviceState *dev_state = s->container;
     PCIDevice *pci_dev = (PCIDevice *) object_dynamic_cast(OBJECT(dev_state),
@@ -174,9 +174,9 @@ static void ahci_check_irq(AHCIState *s)
     trace_ahci_check_irq(s, old_irq, s->control_regs.irqstatus);
     if (s->control_regs.irqstatus &&
         (s->control_regs.ghc & HOST_CTL_IRQ_EN)) {
-            ahci_irq_raise(s, NULL);
+            ahci_irq_raise(s);
     } else {
-        ahci_irq_lower(s, NULL);
+        ahci_irq_lower(s);
     }
 }
 
@@ -531,13 +531,6 @@ static void ahci_check_cmd_bh(void *opaque)
 
     qemu_bh_delete(ad->check_bh);
     ad->check_bh = NULL;
-
-    if ((ad->busy_slot != -1) &&
-        !(ad->port.ifs[0].status & (BUSY_STAT|DRQ_STAT))) {
-        /* no longer busy */
-        ad->port_regs.cmd_issue &= ~(1 << ad->busy_slot);
-        ad->busy_slot = -1;
-    }
 
     check_cmd(ad->hba, ad->port_no);
 }
@@ -1425,11 +1418,16 @@ static void ahci_cmd_done(IDEDMA *dma)
 
     trace_ahci_cmd_done(ad->hba, ad->port_no);
 
+    /* no longer busy */
+    if (ad->busy_slot != -1) {
+        ad->port_regs.cmd_issue &= ~(1 << ad->busy_slot);
+        ad->busy_slot = -1;
+    }
+
     /* update d2h status */
     ahci_write_fis_d2h(ad);
 
-    if (!ad->check_bh) {
-        /* maybe we still have something to process, check later */
+    if (ad->port_regs.cmd_issue && !ad->check_bh) {
         ad->check_bh = qemu_bh_new(ahci_check_cmd_bh, ad);
         qemu_bh_schedule(ad->check_bh);
     }

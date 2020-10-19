@@ -99,6 +99,8 @@ enum mig_rp_message_type {
     MIG_RP_MSG_MAX
 };
 
+bool migrate_pre_2_2;
+
 /* When we add fault tolerance, we could have several
    migrations at once.  For now we don't need to add
    dynamic creation of migration */
@@ -195,6 +197,16 @@ static void migrate_generate_event(int new_state)
     if (migrate_use_events()) {
         qapi_event_send_migration(new_state, &error_abort);
     }
+}
+
+static bool migrate_late_block_activate(void)
+{
+    MigrationState *s;
+
+    s = migrate_get_current();
+
+    return s->enabled_capabilities[
+        MIGRATION_CAPABILITY_LATE_BLOCK_ACTIVATE];
 }
 
 /*
@@ -306,13 +318,23 @@ static void process_incoming_migration_bh(void *opaque)
     Error *local_err = NULL;
     MigrationIncomingState *mis = opaque;
 
-    /* Make sure all file formats flush their mutable metadata.
-     * If we get an error here, just don't restart the VM yet. */
-    bdrv_invalidate_cache_all(&local_err);
-    if (local_err) {
-        error_report_err(local_err);
-        local_err = NULL;
-        autostart = false;
+    /* If capability late_block_activate is set:
+     * Only fire up the block code now if we're going to restart the
+     * VM, else 'cont' will do it.
+     * This causes file locking to happen; so we don't want it to happen
+     * unless we really are starting the VM.
+     */
+    if (!migrate_late_block_activate() ||
+         (autostart && (!global_state_received() ||
+            global_state_get_runstate() == RUN_STATE_RUNNING))) {
+        /* Make sure all file formats flush their mutable metadata.
+         * If we get an error here, just don't restart the VM yet. */
+        bdrv_invalidate_cache_all(&local_err);
+        if (local_err) {
+            error_report_err(local_err);
+            local_err = NULL;
+            autostart = false;
+        }
     }
 
     /*
@@ -1006,14 +1028,14 @@ void qmp_migrate_set_parameters(MigrateSetParameters *params, Error **errp)
     /* TODO Rewrite "" to null instead */
     if (params->has_tls_creds
         && params->tls_creds->type == QTYPE_QNULL) {
-        QDECREF(params->tls_creds->u.n);
+        qobject_unref(params->tls_creds->u.n);
         params->tls_creds->type = QTYPE_QSTRING;
         params->tls_creds->u.s = strdup("");
     }
     /* TODO Rewrite "" to null instead */
     if (params->has_tls_hostname
         && params->tls_hostname->type == QTYPE_QNULL) {
-        QDECREF(params->tls_hostname->u.n);
+        qobject_unref(params->tls_hostname->u.n);
         params->tls_hostname->type = QTYPE_QSTRING;
         params->tls_hostname->u.s = strdup("");
     }
@@ -1248,7 +1270,11 @@ bool migration_in_postcopy_after_devices(MigrationState *s)
 
 bool migration_is_idle(void)
 {
-    MigrationState *s = migrate_get_current();
+    MigrationState *s = current_migration;
+
+    if (!s) {
+        return true;
+    }
 
     switch (s->state) {
     case MIGRATION_STATUS_NONE:
@@ -1308,7 +1334,7 @@ static GSList *migration_blockers;
 
 int migrate_add_blocker(Error *reason, Error **errp)
 {
-    if (migrate_get_current()->only_migratable) {
+    if (only_migratable) {
         error_propagate(errp, error_copy(reason));
         error_prepend(errp, "disallowing migration blocker "
                           "(--only_migratable) for: ");
@@ -2237,8 +2263,7 @@ static void migration_update_counters(MigrationState *s,
      * recalculate. 10000 is a small enough number for our purposes
      */
     if (ram_counters.dirty_pages_rate && transferred > 10000) {
-        s->expected_downtime = ram_counters.dirty_pages_rate *
-            qemu_target_page_size() / bandwidth;
+        s->expected_downtime = ram_counters.remaining / bandwidth;
     }
 
     qemu_file_reset_rate_limit(s->to_dst_file);
@@ -2477,11 +2502,13 @@ void migration_global_dump(Monitor *mon)
     monitor_printf(mon, "store-global-state: %s\n",
                    ms->store_global_state ? "on" : "off");
     monitor_printf(mon, "only-migratable: %s\n",
-                   ms->only_migratable ? "on" : "off");
+                   only_migratable ? "on" : "off");
     monitor_printf(mon, "send-configuration: %s\n",
                    ms->send_configuration ? "on" : "off");
     monitor_printf(mon, "send-section-footer: %s\n",
                    ms->send_section_footer ? "on" : "off");
+    monitor_printf(mon, "decompress-error-check: %s\n",
+                   ms->decompress_error_check ? "on" : "off");
 }
 
 #define DEFINE_PROP_MIG_CAP(name, x)             \
@@ -2490,11 +2517,12 @@ void migration_global_dump(Monitor *mon)
 static Property migration_properties[] = {
     DEFINE_PROP_BOOL("store-global-state", MigrationState,
                      store_global_state, true),
-    DEFINE_PROP_BOOL("only-migratable", MigrationState, only_migratable, false),
     DEFINE_PROP_BOOL("send-configuration", MigrationState,
                      send_configuration, true),
     DEFINE_PROP_BOOL("send-section-footer", MigrationState,
                      send_section_footer, true),
+    DEFINE_PROP_BOOL("decompress-error-check", MigrationState,
+                      decompress_error_check, true),
 
     /* Migration parameters */
     DEFINE_PROP_UINT8("x-compress-level", MigrationState,

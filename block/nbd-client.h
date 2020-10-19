@@ -20,7 +20,7 @@
 typedef struct {
     Coroutine *coroutine;
     uint64_t offset;        /* original offset of the request */
-    bool receiving;         /* waiting for read_reply_co? */
+    bool receiving;         /* waiting for connection_co? */
 } NBDClientRequest;
 
 typedef struct NBDClientSession {
@@ -30,7 +30,7 @@ typedef struct NBDClientSession {
 
     CoMutex send_mutex;
     CoQueue free_sema;
-    Coroutine *read_reply_co;
+    Coroutine *connection_co;
     int in_flight;
 
     NBDClientRequest requests[MAX_NBD_REQUESTS];
@@ -41,10 +41,11 @@ typedef struct NBDClientSession {
 NBDClientSession *nbd_get_client_session(BlockDriverState *bs);
 
 int nbd_client_init(BlockDriverState *bs,
-                    QIOChannelSocket *sock,
+                    SocketAddress *saddr,
                     const char *export_name,
                     QCryptoTLSCreds *tlscreds,
                     const char *hostname,
+                    const char *x_dirty_bitmap,
                     Error **errp);
 void nbd_client_close(BlockDriverState *bs);
 

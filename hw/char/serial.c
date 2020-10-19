@@ -30,6 +30,7 @@
 #include "qemu/timer.h"
 #include "exec/address-spaces.h"
 #include "qemu/error-report.h"
+#include "migration/migration.h"
 
 //#define DEBUG_SERIAL
 
@@ -261,15 +262,20 @@ static void serial_xmit(SerialState *s)
         if (s->mcr & UART_MCR_LOOP) {
             /* in loopback mode, say that we just received a char */
             serial_receive1(s, &s->tsr, 1);
-        } else if (qemu_chr_fe_write(&s->chr, &s->tsr, 1) != 1 &&
-                   s->tsr_retry < MAX_XMIT_RETRY) {
-            assert(s->watch_tag == 0);
-            s->watch_tag =
-                qemu_chr_fe_add_watch(&s->chr, G_IO_OUT | G_IO_HUP,
-                                      serial_watch_cb, s);
-            if (s->watch_tag > 0) {
-                s->tsr_retry++;
-                return;
+        } else {
+            int rc = qemu_chr_fe_write(&s->chr, &s->tsr, 1);
+
+            if ((rc == 0 ||
+                 (rc == -1 && errno == EAGAIN)) &&
+                s->tsr_retry < MAX_XMIT_RETRY) {
+                assert(s->watch_tag == 0);
+                s->watch_tag =
+                    qemu_chr_fe_add_watch(&s->chr, G_IO_OUT | G_IO_HUP,
+                                          serial_watch_cb, s);
+                if (s->watch_tag > 0) {
+                    s->tsr_retry++;
+                    return;
+                }
             }
         }
         s->tsr_retry = 0;
@@ -691,6 +697,9 @@ static int serial_post_load(void *opaque, int version_id)
 static bool serial_thr_ipending_needed(void *opaque)
 {
     SerialState *s = opaque;
+    if (migrate_pre_2_2) {
+        return false;
+    }
 
     if (s->ier & UART_IER_THRI) {
         bool expected_value = ((s->iir & UART_IIR_ID) == UART_IIR_THRI);
@@ -772,6 +781,10 @@ static const VMStateDescription vmstate_serial_xmit_fifo = {
 static bool serial_fifo_timeout_timer_needed(void *opaque)
 {
     SerialState *s = (SerialState *)opaque;
+    if (migrate_pre_2_2) {
+        return false;
+    }
+
     return timer_pending(s->fifo_timeout_timer);
 }
 
@@ -789,6 +802,10 @@ static const VMStateDescription vmstate_serial_fifo_timeout_timer = {
 static bool serial_timeout_ipending_needed(void *opaque)
 {
     SerialState *s = (SerialState *)opaque;
+    if (migrate_pre_2_2) {
+        return false;
+    }
+
     return s->timeout_ipending != 0;
 }
 
@@ -806,6 +823,10 @@ static const VMStateDescription vmstate_serial_timeout_ipending = {
 static bool serial_poll_needed(void *opaque)
 {
     SerialState *s = (SerialState *)opaque;
+    if (migrate_pre_2_2) {
+        return false;
+    }
+
     return s->poll_msl >= 0;
 }
 

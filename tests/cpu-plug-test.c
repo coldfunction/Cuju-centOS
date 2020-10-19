@@ -42,7 +42,7 @@ static void test_plug_with_cpu_add(gconstpointer data)
                        "  'arguments': { 'id': %d } }", i);
         g_assert(response);
         g_assert(!qdict_haskey(response, "error"));
-        QDECREF(response);
+        qobject_unref(response);
     }
 
     qtest_end();
@@ -66,7 +66,7 @@ static void test_plug_without_cpu_add(gconstpointer data)
                    s->sockets * s->cores * s->threads);
     g_assert(response);
     g_assert(qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 
     qtest_end();
     g_free(args);
@@ -192,7 +192,8 @@ static void add_pseries_test_case(const char *mname)
     PlugTestData *data;
 
     if (!g_str_has_prefix(mname, "pseries-") ||
-        (g_str_has_prefix(mname, "pseries-2.") && atoi(&mname[10]) < 7)) {
+        (g_str_has_prefix(mname, "pseries-2.") && atoi(&mname[10]) < 7) ||
+        strcmp(mname,"pseries-rhel7.2.0") == 0) {
         return;
     }
     data = g_new(PlugTestData, 1);

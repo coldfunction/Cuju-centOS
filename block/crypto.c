@@ -21,11 +21,11 @@
 #include "qemu/osdep.h"
 
 #include "block/block_int.h"
+#include "block/qdict.h"
 #include "sysemu/block-backend.h"
 #include "crypto/block.h"
 #include "qapi/opts-visitor.h"
 #include "qapi/qapi-visit-crypto.h"
-#include "qapi/qmp/qdict.h"
 #include "qapi/qobject-input-visitor.h"
 #include "qapi/error.h"
 #include "qemu/option.h"
@@ -159,7 +159,10 @@ block_crypto_open_opts_init(QCryptoBlockFormat format,
     ret = g_new0(QCryptoBlockOpenOptions, 1);
     ret->format = format;
 
-    v = qobject_input_visitor_new_keyval(QOBJECT(opts));
+    v = qobject_input_visitor_new_flat_confused(opts, &local_err);
+    if (local_err) {
+        goto out;
+    }
 
     visit_start_struct(v, NULL, NULL, 0, &local_err);
     if (local_err) {
@@ -210,7 +213,10 @@ block_crypto_create_opts_init(QCryptoBlockFormat format,
     ret = g_new0(QCryptoBlockCreateOptions, 1);
     ret->format = format;
 
-    v = qobject_input_visitor_new_keyval(QOBJECT(opts));
+    v = qobject_input_visitor_new_flat_confused(opts, &local_err);
+    if (local_err) {
+        goto out;
+    }
 
     visit_start_struct(v, NULL, NULL, 0, &local_err);
     if (local_err) {
@@ -305,7 +311,7 @@ static int block_crypto_open_generic(QCryptoBlockFormat format,
 
     ret = 0;
  cleanup:
-    QDECREF(cryptoopts);
+    qobject_unref(cryptoopts);
     qapi_free_QCryptoBlockOpenOptions(open_opts);
     return ret;
 }
@@ -351,8 +357,9 @@ static int block_crypto_co_create_generic(BlockDriverState *bs,
     return ret;
 }
 
-static int block_crypto_truncate(BlockDriverState *bs, int64_t offset,
-                                 PreallocMode prealloc, Error **errp)
+static int coroutine_fn
+block_crypto_co_truncate(BlockDriverState *bs, int64_t offset,
+                         PreallocMode prealloc, Error **errp)
 {
     BlockCrypto *crypto = bs->opaque;
     uint64_t payload_offset =
@@ -365,7 +372,7 @@ static int block_crypto_truncate(BlockDriverState *bs, int64_t offset,
 
     offset += payload_offset;
 
-    return bdrv_truncate(bs->file, offset, prealloc, errp);
+    return bdrv_co_truncate(bs->file, offset, prealloc, errp);
 }
 
 static void block_crypto_close(BlockDriverState *bs)
@@ -635,7 +642,7 @@ static int coroutine_fn block_crypto_co_create_opts_luks(const char *filename,
 fail:
     bdrv_unref(bs);
     qapi_free_QCryptoBlockCreateOptions(create_opts);
-    QDECREF(cryptoopts);
+    qobject_unref(cryptoopts);
     return ret;
 }
 
@@ -657,20 +664,17 @@ static int block_crypto_get_info_luks(BlockDriverState *bs,
 }
 
 static ImageInfoSpecific *
-block_crypto_get_specific_info_luks(BlockDriverState *bs)
+block_crypto_get_specific_info_luks(BlockDriverState *bs, Error **errp)
 {
     BlockCrypto *crypto = bs->opaque;
     ImageInfoSpecific *spec_info;
     QCryptoBlockInfo *info;
 
-    info = qcrypto_block_get_info(crypto->block, NULL);
+    info = qcrypto_block_get_info(crypto->block, errp);
     if (!info) {
         return NULL;
     }
-    if (info->format != Q_CRYPTO_BLOCK_FORMAT_LUKS) {
-        qapi_free_QCryptoBlockInfo(info);
-        return NULL;
-    }
+    assert(info->format == Q_CRYPTO_BLOCK_FORMAT_LUKS);
 
     spec_info = g_new(ImageInfoSpecific, 1);
     spec_info->type = IMAGE_INFO_SPECIFIC_KIND_LUKS;
@@ -691,10 +695,12 @@ BlockDriver bdrv_crypto_luks = {
     .bdrv_probe         = block_crypto_probe_luks,
     .bdrv_open          = block_crypto_open_luks,
     .bdrv_close         = block_crypto_close,
-    .bdrv_child_perm    = bdrv_format_default_perms,
+    /* This driver doesn't modify LUKS metadata except when creating image.
+     * Allow share-rw=on as a special case. */
+    .bdrv_child_perm    = bdrv_filter_default_perms,
     .bdrv_co_create     = block_crypto_co_create_luks,
     .bdrv_co_create_opts = block_crypto_co_create_opts_luks,
-    .bdrv_truncate      = block_crypto_truncate,
+    .bdrv_co_truncate   = block_crypto_co_truncate,
     .create_opts        = &block_crypto_create_opts_luks,
 
     .bdrv_reopen_prepare = block_crypto_reopen_prepare,

@@ -24,6 +24,7 @@
 #include "hw/virtio/virtio-access.h"
 #include "sysemu/dma.h"
 
+#include "standard-headers/linux/virtio_net.h"
 /*
  * The alignment to use between consumer and producer parts of vring.
  * x86 pagesize again. This is the default, used by transports like PCI
@@ -344,6 +345,10 @@ int virtio_queue_ready(VirtQueue *vq)
  * Called within rcu_read_lock().  */
 static int virtio_queue_empty_rcu(VirtQueue *vq)
 {
+    if (unlikely(vq->vdev->broken)) {
+        return 1;
+    }
+
     if (unlikely(!vq->vring.avail)) {
         return 1;
     }
@@ -358,6 +363,10 @@ static int virtio_queue_empty_rcu(VirtQueue *vq)
 int virtio_queue_empty(VirtQueue *vq)
 {
     bool empty;
+
+    if (unlikely(vq->vdev->broken)) {
+        return 1;
+    }
 
     if (unlikely(!vq->vring.avail)) {
         return 1;
@@ -1991,7 +2000,24 @@ const VMStateInfo  virtio_vmstate_info = {
 static int virtio_set_features_nocheck(VirtIODevice *vdev, uint64_t val)
 {
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
-    bool bad = (val & ~(vdev->host_features)) != 0;
+    bool bad;
+    uint64_t ctrl_guest_mask = 1ull << VIRTIO_NET_F_CTRL_GUEST_OFFLOADS;
+
+    if (vdev->rhel6_ctrl_guest_workaround && (val & ctrl_guest_mask) &&
+          !(vdev->host_features & ctrl_guest_mask)) {
+        /*
+         * This works around a mistake in the definition of the rhel6.[56].0
+         * machinetypes, ctrl-guest-offload was not set in qemu-kvm-rhev for
+         * those machine types, but is set on the rhel6 qemu-kvm-rhev build.
+         * If an incoming rhel6 guest uses it then we need to allow it.
+         * Note: There's a small race where a guest read the flag but didn't
+         * declare it's useage yet.
+         */
+        fprintf(stderr, "RHEL6 ctrl_guest_offload workaround\n");
+        vdev->host_features |= ctrl_guest_mask;
+    }
+
+    bad = (val & ~(vdev->host_features)) != 0;
 
     val &= vdev->host_features;
     if (k->set_features) {
@@ -2003,14 +2029,25 @@ static int virtio_set_features_nocheck(VirtIODevice *vdev, uint64_t val)
 
 int virtio_set_features(VirtIODevice *vdev, uint64_t val)
 {
-   /*
+    int ret;
+    /*
      * The driver must not attempt to set features after feature negotiation
      * has finished.
      */
     if (vdev->status & VIRTIO_CONFIG_S_FEATURES_OK) {
         return -EINVAL;
     }
-    return virtio_set_features_nocheck(vdev, val);
+    ret = virtio_set_features_nocheck(vdev, val);
+    if (!ret && virtio_vdev_has_feature(vdev, VIRTIO_RING_F_EVENT_IDX)) {
+        /* VIRTIO_RING_F_EVENT_IDX changes the size of the caches.  */
+        int i;
+        for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
+            if (vdev->vq[i].vring.num != 0) {
+                virtio_init_region_cache(vdev, i);
+            }
+        }
+    }
+    return ret;
 }
 
 int virtio_load(VirtIODevice *vdev, QEMUFile *f, int version_id)
@@ -2269,8 +2306,8 @@ void virtio_init(VirtIODevice *vdev, const char *name,
     } else {
         vdev->config = NULL;
     }
-    vdev->vmstate = qemu_add_vm_change_state_handler(virtio_vmstate_change,
-                                                     vdev);
+    vdev->vmstate = qdev_add_vm_change_state_handler(DEVICE(vdev),
+            virtio_vmstate_change, vdev);
     vdev->device_endian = virtio_default_endian();
     vdev->use_guest_notifier_mask = true;
 }
@@ -2278,6 +2315,11 @@ void virtio_init(VirtIODevice *vdev, const char *name,
 hwaddr virtio_queue_get_desc_addr(VirtIODevice *vdev, int n)
 {
     return vdev->vq[n].vring.desc;
+}
+
+bool virtio_queue_enabled(VirtIODevice *vdev, int n)
+{
+    return virtio_queue_get_desc_addr(vdev, n) != 0;
 }
 
 hwaddr virtio_queue_get_avail_addr(VirtIODevice *vdev, int n)
@@ -2454,6 +2496,19 @@ EventNotifier *virtio_queue_get_host_notifier(VirtQueue *vq)
     return &vq->host_notifier;
 }
 
+int virtio_queue_set_host_notifier_mr(VirtIODevice *vdev, int n,
+                                      MemoryRegion *mr, bool assign)
+{
+    BusState *qbus = qdev_get_parent_bus(DEVICE(vdev));
+    VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(qbus);
+
+    if (k->set_host_notifier_mr) {
+        return k->set_host_notifier_mr(qbus->parent, n, mr, assign);
+    }
+
+    return -1;
+}
+
 void virtio_device_set_child_bus_name(VirtIODevice *vdev, char *bus_name)
 {
     g_free(vdev->bus_name);
@@ -2566,6 +2621,8 @@ static void virtio_device_instance_finalize(Object *obj)
 
 static Property virtio_properties[] = {
     DEFINE_VIRTIO_COMMON_FEATURES(VirtIODevice, host_features),
+    DEFINE_PROP_BOOL("__com.redhat_rhel6_ctrl_guest_workaround", VirtIODevice,
+                     rhel6_ctrl_guest_workaround, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 

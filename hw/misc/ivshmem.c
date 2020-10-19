@@ -892,6 +892,13 @@ static void ivshmem_common_realize(PCIDevice *dev, Error **errp)
         return;
     }
 
+    /* Migration disabled for Red Hat Enterprise Linux: */
+    if (s->master == ON_OFF_AUTO_ON) {
+        error_setg(errp, "master=on is not supported");
+        return;
+    }
+    s->master = ON_OFF_AUTO_OFF;
+
     pci_conf = dev->config;
     pci_conf[PCI_COMMAND] = PCI_COMMAND_IO | PCI_COMMAND_MEMORY;
 
@@ -909,8 +916,8 @@ static void ivshmem_common_realize(PCIDevice *dev, Error **errp)
     if (s->hostmem != NULL) {
         IVSHMEM_DPRINTF("using hostmem\n");
 
-        s->ivshmem_bar2 = host_memory_backend_get_memory(s->hostmem,
-                                                         &error_abort);
+        s->ivshmem_bar2 = host_memory_backend_get_memory(s->hostmem);
+        host_memory_backend_set_mapped(s->hostmem, true);
     } else {
         Chardev *chr = qemu_chr_fe_get_driver(&s->server_chr);
         assert(chr);
@@ -991,6 +998,10 @@ static void ivshmem_exit(PCIDevice *dev)
         }
 
         vmstate_unregister_ram(s->ivshmem_bar2, DEVICE(dev));
+    }
+
+    if (s->hostmem) {
+        host_memory_backend_set_mapped(s->hostmem, false);
     }
 
     if (s->peers) {
@@ -1101,14 +1112,6 @@ static void ivshmem_plain_realize(PCIDevice *dev, Error **errp)
     }
 
     ivshmem_common_realize(dev, errp);
-    host_memory_backend_set_mapped(s->hostmem, true);
-}
-
-static void ivshmem_plain_exit(PCIDevice *pci_dev)
-{
-    IVShmemState *s = IVSHMEM_COMMON(pci_dev);
-
-    host_memory_backend_set_mapped(s->hostmem, false);
 }
 
 static void ivshmem_plain_class_init(ObjectClass *klass, void *data)
@@ -1117,7 +1120,6 @@ static void ivshmem_plain_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
     k->realize = ivshmem_plain_realize;
-    k->exit = ivshmem_plain_exit;
     dc->props = ivshmem_plain_properties;
     dc->vmsd = &ivshmem_plain_vmsd;
 }
@@ -1183,6 +1185,8 @@ static void ivshmem_doorbell_class_init(ObjectClass *klass, void *data)
     k->realize = ivshmem_doorbell_realize;
     dc->props = ivshmem_doorbell_properties;
     dc->vmsd = &ivshmem_doorbell_vmsd;
+    /* Disabled for Red Hat Enterprise Linux: */
+    dc->user_creatable = false;
 }
 
 static const TypeInfo ivshmem_doorbell_info = {
@@ -1352,6 +1356,8 @@ static void ivshmem_class_init(ObjectClass *klass, void *data)
     dc->desc = "Inter-VM shared memory (legacy)";
     dc->props = ivshmem_properties;
     dc->vmsd = &ivshmem_vmsd;
+    /* Disabled for Red Hat Enterprise Linux: */
+    dc->user_creatable = false;
 }
 
 static const TypeInfo ivshmem_info = {

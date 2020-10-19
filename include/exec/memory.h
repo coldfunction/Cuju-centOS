@@ -102,6 +102,29 @@ struct IOMMUNotifier {
 };
 typedef struct IOMMUNotifier IOMMUNotifier;
 
+/* RAM is pre-allocated and passed into qemu_ram_alloc_from_ptr */
+#define RAM_PREALLOC   (1 << 0)
+
+/* RAM is mmap-ed with MAP_SHARED */
+#define RAM_SHARED     (1 << 1)
+
+/* Only a portion of RAM (used_length) is actually used, and migrated.
+ * This used_length size can change across reboots.
+ */
+#define RAM_RESIZEABLE (1 << 2)
+
+/* UFFDIO_ZEROPAGE is available on this RAMBlock to atomically
+ * zero the page and wake waiting processes.
+ * (Set during postcopy)
+ */
+#define RAM_UF_ZEROPAGE (1 << 3)
+
+/* RAM can be migrated */
+#define RAM_MIGRATABLE (1 << 4)
+
+/* RAM is a persistent kind memory */
+#define RAM_PMEM (1 << 5)
+
 static inline void iommu_notifier_init(IOMMUNotifier *n, IOMMUNotify fn,
                                        IOMMUNotifierFlag flags,
                                        hwaddr start, hwaddr end)
@@ -507,6 +530,7 @@ void memory_region_init_resizeable_ram(MemoryRegion *mr,
                                                        void *host),
                                        Error **errp);
 #ifdef __linux__
+
 /**
  * memory_region_init_ram_from_file:  Initialize RAM memory region with a
  *                                    mmap-ed backend.
@@ -518,7 +542,10 @@ void memory_region_init_resizeable_ram(MemoryRegion *mr,
  * @size: size of the region.
  * @align: alignment of the region base address; if 0, the default alignment
  *         (getpagesize()) will be used.
- * @share: %true if memory must be mmaped with the MAP_SHARED flag
+ * @ram_flags: Memory region features:
+ *             - RAM_SHARED: memory must be mmaped with the MAP_SHARED flag
+ *             - RAM_PMEM: the memory is persistent memory
+ *             Other bits are ignored now.
  * @path: the path in which to allocate the RAM.
  * @errp: pointer to Error*, to store an error if it happens.
  *
@@ -530,7 +557,7 @@ void memory_region_init_ram_from_file(MemoryRegion *mr,
                                       const char *name,
                                       uint64_t size,
                                       uint64_t align,
-                                      bool share,
+                                      uint32_t ram_flags,
                                       const char *path,
                                       Error **errp);
 
@@ -1676,57 +1703,91 @@ MemTxResult address_space_write(AddressSpace *as, hwaddr addr,
  * @result: location to write the success/failure of the transaction;
  *   if NULL, this information is discarded
  */
-uint32_t address_space_ldub(AddressSpace *as, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-uint32_t address_space_lduw_le(AddressSpace *as, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-uint32_t address_space_lduw_be(AddressSpace *as, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-uint32_t address_space_ldl_le(AddressSpace *as, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-uint32_t address_space_ldl_be(AddressSpace *as, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-uint64_t address_space_ldq_le(AddressSpace *as, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-uint64_t address_space_ldq_be(AddressSpace *as, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stb(AddressSpace *as, hwaddr addr, uint32_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stw_le(AddressSpace *as, hwaddr addr, uint32_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stw_be(AddressSpace *as, hwaddr addr, uint32_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stl_le(AddressSpace *as, hwaddr addr, uint32_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stl_be(AddressSpace *as, hwaddr addr, uint32_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stq_le(AddressSpace *as, hwaddr addr, uint64_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stq_be(AddressSpace *as, hwaddr addr, uint64_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
 
-uint32_t ldub_phys(AddressSpace *as, hwaddr addr);
-uint32_t lduw_le_phys(AddressSpace *as, hwaddr addr);
-uint32_t lduw_be_phys(AddressSpace *as, hwaddr addr);
-uint32_t ldl_le_phys(AddressSpace *as, hwaddr addr);
-uint32_t ldl_be_phys(AddressSpace *as, hwaddr addr);
-uint64_t ldq_le_phys(AddressSpace *as, hwaddr addr);
-uint64_t ldq_be_phys(AddressSpace *as, hwaddr addr);
-void stb_phys(AddressSpace *as, hwaddr addr, uint32_t val);
-void stw_le_phys(AddressSpace *as, hwaddr addr, uint32_t val);
-void stw_be_phys(AddressSpace *as, hwaddr addr, uint32_t val);
-void stl_le_phys(AddressSpace *as, hwaddr addr, uint32_t val);
-void stl_be_phys(AddressSpace *as, hwaddr addr, uint32_t val);
-void stq_le_phys(AddressSpace *as, hwaddr addr, uint64_t val);
-void stq_be_phys(AddressSpace *as, hwaddr addr, uint64_t val);
+#define SUFFIX
+#define ARG1         as
+#define ARG1_DECL    AddressSpace *as
+#include "exec/memory_ldst.inc.h"
+
+#define SUFFIX
+#define ARG1         as
+#define ARG1_DECL    AddressSpace *as
+#include "exec/memory_ldst_phys.inc.h"
 
 struct MemoryRegionCache {
+    void *ptr;
     hwaddr xlat;
     hwaddr len;
-    AddressSpace *as;
+    FlatView *fv;
+    MemoryRegionSection mrs;
+    bool is_write;
 };
 
-#define MEMORY_REGION_CACHE_INVALID ((MemoryRegionCache) { .as = NULL })
+#define MEMORY_REGION_CACHE_INVALID ((MemoryRegionCache) { .mrs.mr = NULL })
+
+
+/* address_space_ld*_cached: load from a cached #MemoryRegion
+ * address_space_st*_cached: store into a cached #MemoryRegion
+ *
+ * These functions perform a load or store of the byte, word,
+ * longword or quad to the specified address.  The address is
+ * a physical address in the AddressSpace, but it must lie within
+ * a #MemoryRegion that was mapped with address_space_cache_init.
+ *
+ * The _le suffixed functions treat the data as little endian;
+ * _be indicates big endian; no suffix indicates "same endianness
+ * as guest CPU".
+ *
+ * The "guest CPU endianness" accessors are deprecated for use outside
+ * target-* code; devices should be CPU-agnostic and use either the LE
+ * or the BE accessors.
+ *
+ * @cache: previously initialized #MemoryRegionCache to be accessed
+ * @addr: address within the address space
+ * @val: data value, for stores
+ * @attrs: memory transaction attributes
+ * @result: location to write the success/failure of the transaction;
+ *   if NULL, this information is discarded
+ */
+
+#define SUFFIX       _cached_slow
+#define ARG1         cache
+#define ARG1_DECL    MemoryRegionCache *cache
+#include "exec/memory_ldst.inc.h"
+
+/* Inline fast path for direct RAM access.  */
+static inline uint8_t address_space_ldub_cached(MemoryRegionCache *cache,
+    hwaddr addr, MemTxAttrs attrs, MemTxResult *result)
+{
+    assert(addr < cache->len);
+    if (likely(cache->ptr)) {
+        return ldub_p(cache->ptr + addr);
+    } else {
+        return address_space_ldub_cached_slow(cache, addr, attrs, result);
+    }
+}
+
+static inline void address_space_stb_cached(MemoryRegionCache *cache,
+    hwaddr addr, uint32_t val, MemTxAttrs attrs, MemTxResult *result)
+{
+    assert(addr < cache->len);
+    if (likely(cache->ptr)) {
+        stb_p(cache->ptr + addr, val);
+    } else {
+        address_space_stb_cached_slow(cache, addr, val, attrs, result);
+    }
+}
+
+#define ENDIANNESS   _le
+#include "exec/memory_ldst_cached.inc.h"
+
+#define ENDIANNESS   _be
+#include "exec/memory_ldst_cached.inc.h"
+
+#define SUFFIX       _cached
+#define ARG1         cache
+#define ARG1_DECL    MemoryRegionCache *cache
+#include "exec/memory_ldst_phys.inc.h"
 
 /* address_space_cache_init: prepare for repeated access to a physical
  * memory region
@@ -1772,72 +1833,6 @@ void address_space_cache_invalidate(MemoryRegionCache *cache,
  */
 void address_space_cache_destroy(MemoryRegionCache *cache);
 
-/* address_space_ld*_cached: load from a cached #MemoryRegion
- * address_space_st*_cached: store into a cached #MemoryRegion
- *
- * These functions perform a load or store of the byte, word,
- * longword or quad to the specified address.  The address is
- * a physical address in the AddressSpace, but it must lie within
- * a #MemoryRegion that was mapped with address_space_cache_init.
- *
- * The _le suffixed functions treat the data as little endian;
- * _be indicates big endian; no suffix indicates "same endianness
- * as guest CPU".
- *
- * The "guest CPU endianness" accessors are deprecated for use outside
- * target-* code; devices should be CPU-agnostic and use either the LE
- * or the BE accessors.
- *
- * @cache: previously initialized #MemoryRegionCache to be accessed
- * @addr: address within the address space
- * @val: data value, for stores
- * @attrs: memory transaction attributes
- * @result: location to write the success/failure of the transaction;
- *   if NULL, this information is discarded
- */
-uint32_t address_space_ldub_cached(MemoryRegionCache *cache, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-uint32_t address_space_lduw_le_cached(MemoryRegionCache *cache, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-uint32_t address_space_lduw_be_cached(MemoryRegionCache *cache, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-uint32_t address_space_ldl_le_cached(MemoryRegionCache *cache, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-uint32_t address_space_ldl_be_cached(MemoryRegionCache *cache, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-uint64_t address_space_ldq_le_cached(MemoryRegionCache *cache, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-uint64_t address_space_ldq_be_cached(MemoryRegionCache *cache, hwaddr addr,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stb_cached(MemoryRegionCache *cache, hwaddr addr, uint32_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stw_le_cached(MemoryRegionCache *cache, hwaddr addr, uint32_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stw_be_cached(MemoryRegionCache *cache, hwaddr addr, uint32_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stl_le_cached(MemoryRegionCache *cache, hwaddr addr, uint32_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stl_be_cached(MemoryRegionCache *cache, hwaddr addr, uint32_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stq_le_cached(MemoryRegionCache *cache, hwaddr addr, uint64_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-void address_space_stq_be_cached(MemoryRegionCache *cache, hwaddr addr, uint64_t val,
-                            MemTxAttrs attrs, MemTxResult *result);
-
-uint32_t ldub_phys_cached(MemoryRegionCache *cache, hwaddr addr);
-uint32_t lduw_le_phys_cached(MemoryRegionCache *cache, hwaddr addr);
-uint32_t lduw_be_phys_cached(MemoryRegionCache *cache, hwaddr addr);
-uint32_t ldl_le_phys_cached(MemoryRegionCache *cache, hwaddr addr);
-uint32_t ldl_be_phys_cached(MemoryRegionCache *cache, hwaddr addr);
-uint64_t ldq_le_phys_cached(MemoryRegionCache *cache, hwaddr addr);
-uint64_t ldq_be_phys_cached(MemoryRegionCache *cache, hwaddr addr);
-void stb_phys_cached(MemoryRegionCache *cache, hwaddr addr, uint32_t val);
-void stw_le_phys_cached(MemoryRegionCache *cache, hwaddr addr, uint32_t val);
-void stw_be_phys_cached(MemoryRegionCache *cache, hwaddr addr, uint32_t val);
-void stl_le_phys_cached(MemoryRegionCache *cache, hwaddr addr, uint32_t val);
-void stl_be_phys_cached(MemoryRegionCache *cache, hwaddr addr, uint32_t val);
-void stq_le_phys_cached(MemoryRegionCache *cache, hwaddr addr, uint64_t val);
-void stq_be_phys_cached(MemoryRegionCache *cache, hwaddr addr, uint64_t val);
 /* address_space_get_iotlb_entry: translate an address into an IOTLB
  * entry. Should be called from an RCU critical section.
  */
@@ -1925,6 +1920,13 @@ MemTxResult flatview_read_continue(FlatView *fv, hwaddr addr,
                                    MemoryRegion *mr);
 void *qemu_map_ram_ptr(RAMBlock *ram_block, ram_addr_t addr);
 
+/* Internal functions, part of the implementation of address_space_read_cached
+ * and address_space_write_cached.  */
+void address_space_read_cached_slow(MemoryRegionCache *cache,
+                                    hwaddr addr, void *buf, int len);
+void address_space_write_cached_slow(MemoryRegionCache *cache,
+                                     hwaddr addr, const void *buf, int len);
+
 static inline bool memory_access_is_direct(MemoryRegion *mr, bool is_write)
 {
     if (is_write) {
@@ -1993,7 +1995,11 @@ address_space_read_cached(MemoryRegionCache *cache, hwaddr addr,
                           void *buf, int len)
 {
     assert(addr < cache->len && len <= cache->len - addr);
-    address_space_read(cache->as, cache->xlat + addr, MEMTXATTRS_UNSPECIFIED, buf, len);
+    if (likely(cache->ptr)) {
+        memcpy(buf, cache->ptr + addr, len);
+    } else {
+        address_space_read_cached_slow(cache, addr, buf, len);
+    }
 }
 
 /**
@@ -2009,7 +2015,11 @@ address_space_write_cached(MemoryRegionCache *cache, hwaddr addr,
                            void *buf, int len)
 {
     assert(addr < cache->len && len <= cache->len - addr);
-    address_space_write(cache->as, cache->xlat + addr, MEMTXATTRS_UNSPECIFIED, buf, len);
+    if (likely(cache->ptr)) {
+        memcpy(cache->ptr + addr, buf, len);
+    } else {
+        address_space_write_cached_slow(cache, addr, buf, len);
+    }
 }
 
 #endif

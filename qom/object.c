@@ -1129,7 +1129,7 @@ void object_property_set_str(Object *obj, const char *value,
     QString *qstr = qstring_from_str(value);
     object_property_set_qobject(obj, QOBJECT(qstr), name, errp);
 
-    QDECREF(qstr);
+    qobject_unref(qstr);
 }
 
 char *object_property_get_str(Object *obj, const char *name,
@@ -1147,7 +1147,7 @@ char *object_property_get_str(Object *obj, const char *name,
         error_setg(errp, QERR_INVALID_PARAMETER_TYPE, name, "string");
     }
 
-    qobject_decref(ret);
+    qobject_unref(ret);
     return retval;
 }
 
@@ -1187,7 +1187,7 @@ void object_property_set_bool(Object *obj, bool value,
     QBool *qbool = qbool_from_bool(value);
     object_property_set_qobject(obj, QOBJECT(qbool), name, errp);
 
-    QDECREF(qbool);
+    qobject_unref(qbool);
 }
 
 bool object_property_get_bool(Object *obj, const char *name,
@@ -1208,7 +1208,7 @@ bool object_property_get_bool(Object *obj, const char *name,
         retval = qbool_get_bool(qbool);
     }
 
-    qobject_decref(ret);
+    qobject_unref(ret);
     return retval;
 }
 
@@ -1218,7 +1218,7 @@ void object_property_set_int(Object *obj, int64_t value,
     QNum *qnum = qnum_from_int(value);
     object_property_set_qobject(obj, QOBJECT(qnum), name, errp);
 
-    QDECREF(qnum);
+    qobject_unref(qnum);
 }
 
 int64_t object_property_get_int(Object *obj, const char *name,
@@ -1238,7 +1238,7 @@ int64_t object_property_get_int(Object *obj, const char *name,
         retval = -1;
     }
 
-    qobject_decref(ret);
+    qobject_unref(ret);
     return retval;
 }
 
@@ -1248,7 +1248,7 @@ void object_property_set_uint(Object *obj, uint64_t value,
     QNum *qnum = qnum_from_uint(value);
 
     object_property_set_qobject(obj, QOBJECT(qnum), name, errp);
-    QDECREF(qnum);
+    qobject_unref(qnum);
 }
 
 uint64_t object_property_get_uint(Object *obj, const char *name,
@@ -1267,7 +1267,7 @@ uint64_t object_property_get_uint(Object *obj, const char *name,
         retval = 0;
     }
 
-    qobject_decref(ret);
+    qobject_unref(ret);
     return retval;
 }
 
@@ -1564,9 +1564,11 @@ static void object_set_link_property(Object *obj, Visitor *v,
         return;
     }
 
-    object_ref(new_target);
     *child = new_target;
-    object_unref(old_target);
+    if (prop->flags == OBJ_PROP_LINK_STRONG) {
+        object_ref(new_target);
+        object_unref(old_target);
+    }
 }
 
 static Object *object_resolve_link_property(Object *parent, void *opaque, const gchar *part)
@@ -1581,7 +1583,7 @@ static void object_release_link_property(Object *obj, const char *name,
 {
     LinkProperty *prop = opaque;
 
-    if ((prop->flags & OBJ_PROP_LINK_UNREF_ON_RELEASE) && *prop->child) {
+    if ((prop->flags & OBJ_PROP_LINK_STRONG) && *prop->child) {
         object_unref(*prop->child);
     }
     g_free(prop);

@@ -298,11 +298,16 @@ uint64_t pc_dimm_get_free_addr(uint64_t address_space_start,
     uint64_t new_addr, ret = 0;
     uint64_t address_space_end = address_space_start + address_space_size;
 
-    g_assert(QEMU_ALIGN_UP(address_space_start, align) == address_space_start);
-
     if (!address_space_size) {
         error_setg(errp, "memory hotplug is not enabled, "
                          "please add maxmem option");
+        goto out;
+    }
+
+    /* address_space_start indicates the maximum alignment we expect */
+    if (QEMU_ALIGN_UP(address_space_start, align) != address_space_start) {
+        error_setg(errp, "the alignment (0x%" PRIx64 ") is not supported",
+                   align);
         goto out;
     }
 
@@ -437,12 +442,12 @@ static MemoryRegion *pc_dimm_get_memory_region(PCDIMMDevice *dimm, Error **errp)
         return NULL;
     }
 
-    return host_memory_backend_get_memory(dimm->hostmem, errp);
+    return host_memory_backend_get_memory(dimm->hostmem);
 }
 
 static MemoryRegion *pc_dimm_get_vmstate_memory_region(PCDIMMDevice *dimm)
 {
-    return host_memory_backend_get_memory(dimm->hostmem, &error_abort);
+    return host_memory_backend_get_memory(dimm->hostmem);
 }
 
 static void pc_dimm_class_init(ObjectClass *oc, void *data)

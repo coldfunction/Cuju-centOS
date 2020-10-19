@@ -73,6 +73,8 @@ but should be used with extreme caution.  Note that this command only
 resizes image files, it can not resize block devices like LVM volumes.
 ETEXI
 
+#ifdef CONFIG_LIVE_BLOCK_OPS
+
     {
         .name       = "block_stream",
         .args_type  = "device:B,speed:o?,base:s?",
@@ -159,6 +161,8 @@ STEXI
 @findex block_job_resume
 Resume a paused block streaming operation.
 ETEXI
+
+#endif /* CONFIG_LIVE_BLOCK_OPS */
 
     {
         .name       = "eject",
@@ -265,6 +269,20 @@ STEXI
 @item screendump @var{filename}
 @findex screendump
 Save screen into PPM image @var{filename}.
+ETEXI
+
+    {
+        .name       = "__com.redhat_qxl_screendump",
+        .args_type  = "id:s,filename:F",
+        .params     = "id filename",
+        .help       = "save screen from qxl device 'id' into PPM image 'filename'",
+        .cmd = hmp___com_redhat_qxl_screen_dump,
+    },
+
+STEXI
+@item __com.redhat_qxl_screendump @var{id} @var{filename}
+@findex __com.redhat_qxl_screendump
+Save screen from qxl device @var{id} into PPM image @var{filename}.
 ETEXI
 
     {
@@ -1151,6 +1169,8 @@ STEXI
 Enables or disables migration mode.
 ETEXI
 
+#ifdef CONFIG_LIVE_BLOCK_OPS
+
     {
         .name       = "snapshot_blkdev",
         .args_type  = "reuse:-n,device:B,snapshot-file:s?,format:s?",
@@ -1171,6 +1191,8 @@ STEXI
 @findex snapshot_blkdev
 Snapshot device, using snapshot file as target if provided
 ETEXI
+
+#endif /* CONFIG_LIVE_BLOCK_OPS */
 
     {
         .name       = "snapshot_blkdev_internal",
@@ -1205,6 +1227,8 @@ STEXI
 @findex snapshot_delete_blkdev_internal
 Delete an internal snapshot on device if it support
 ETEXI
+
+#ifdef CONFIG_LIVE_BLOCK_OPS
 
     {
         .name       = "drive_mirror",
@@ -1249,6 +1273,8 @@ STEXI
 Start a point-in-time copy of a block device to a specificed target.
 ETEXI
 
+#endif /* CONFIG_LIVE_BLOCK_OPS */
+
     {
         .name       = "drive_add",
         .args_type  = "node:-n,pci_addr:s,opts:s",
@@ -1266,6 +1292,20 @@ STEXI
 @item drive_add
 @findex drive_add
 Add drive to PCI storage controller.
+ETEXI
+
+    {
+        .name       = "__com.redhat_drive_add",
+        .args_type  = "simple-drive:O",
+        .params     = "id=name,[file=file][,format=f][,media=d]...",
+        .help       = "Create a drive similar to -drive if=none.",
+        .cmd = hmp_simple_drive_add,
+    },
+
+STEXI
+@item __com.redhat_drive_add
+@findex __com.redhat_drive_add
+Create a drive similar to -drive if=none.
 ETEXI
 
     {

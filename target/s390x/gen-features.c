@@ -1,7 +1,7 @@
 /*
  * S390 feature list generator
  *
- * Copyright 2016 IBM Corp.
+ * Copyright IBM Corp. 2016, 2018
  *
  * Author(s): Michael Mueller <mimu@linux.vnet.ibm.com>
  *            David Hildenbrand <dahi@linux.vnet.ibm.com>
@@ -471,6 +471,7 @@ static uint16_t full_GEN14_GA1[] = {
     S390_FEAT_GROUP_MSA_EXT_7,
     S390_FEAT_GROUP_MSA_EXT_8,
     S390_FEAT_CMM_NT,
+    S390_FEAT_ETOKEN,
     S390_FEAT_HPMA2,
     S390_FEAT_SIE_KSS,
     S390_FEAT_GROUP_MULTIPLE_EPOCH_PTFF,
@@ -512,6 +513,8 @@ static uint16_t default_GEN11_GA1[] = {
     S390_FEAT_IPTE_RANGE,
     S390_FEAT_ACCESS_EXCEPTION_FS_INDICATION,
     S390_FEAT_GROUP_MSA_EXT_4,
+    S390_FEAT_PPA15,
+    S390_FEAT_BPB,
 };
 
 #define default_GEN11_GA2 EmptyFeat

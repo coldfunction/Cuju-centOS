@@ -659,7 +659,7 @@ static uint32_t spapr_pc_dimm_node(MemoryDeviceInfoList *list, ram_addr_t addr)
         if (value && value->type == MEMORY_DEVICE_INFO_KIND_DIMM) {
             PCDIMMDeviceInfo *pcdimm_info = value->u.dimm.data;
 
-            if (pcdimm_info->addr >= addr &&
+            if (addr >= pcdimm_info->addr &&
                 addr < (pcdimm_info->addr + pcdimm_info->size)) {
                 return pcdimm_info->node;
             }
@@ -910,6 +910,13 @@ static void spapr_dt_rtas(sPAPRMachineState *spapr, void *fdt)
         0, cpu_to_be32(SPAPR_MEMORY_BLOCK_SIZE),
         cpu_to_be32(max_cpus / smp_threads),
     };
+    uint32_t maxdomains[] = {
+        cpu_to_be32(4),
+        cpu_to_be32(0),
+        cpu_to_be32(0),
+        cpu_to_be32(0),
+        cpu_to_be32(nb_numa_nodes ? nb_numa_nodes : 1),
+    };
 
     _FDT(rtas = fdt_add_subnode(fdt, 0, "rtas"));
 
@@ -926,6 +933,7 @@ static void spapr_dt_rtas(sPAPRMachineState *spapr, void *fdt)
     add_str(hypertas, "hcall-sprg0");
     add_str(hypertas, "hcall-copy");
     add_str(hypertas, "hcall-debug");
+    add_str(hypertas, "hcall-vphn");
     add_str(qemu_hypertas, "hcall-memop1");
 
     if (!kvm_enabled() || kvmppc_spapr_use_multitce()) {
@@ -945,6 +953,9 @@ static void spapr_dt_rtas(sPAPRMachineState *spapr, void *fdt)
 
     _FDT(fdt_setprop(fdt, rtas, "ibm,associativity-reference-points",
                      refpoints, sizeof(refpoints)));
+
+    _FDT(fdt_setprop(fdt, rtas, "ibm,max-associativity-domains",
+                     maxdomains, sizeof(maxdomains)));
 
     _FDT(fdt_setprop_cell(fdt, rtas, "rtas-error-log-max",
                           RTAS_ERROR_LOG_MAX));
@@ -1153,6 +1164,7 @@ static void *spapr_build_fdt(sPAPRMachineState *spapr,
     /* /vdevice */
     spapr_dt_vdevice(spapr->vio_bus, fdt);
 
+#if 0 /* Disabled in Red Hat Enterprise Linux */
     if (object_resolve_path_type("", TYPE_SPAPR_RNG, NULL)) {
         ret = spapr_rng_populate_dt(fdt);
         if (ret < 0) {
@@ -1160,7 +1172,7 @@ static void *spapr_build_fdt(sPAPRMachineState *spapr,
             exit(1);
         }
     }
-
+#endif
     QLIST_FOREACH(phb, &spapr->phbs, list) {
         ret = spapr_populate_pci_dt(phb, PHANDLE_XICP, fdt);
         if (ret < 0) {
@@ -3069,6 +3081,9 @@ out:
 static void spapr_memory_pre_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
                                   Error **errp)
 {
+#if !defined(CONFIG_RHV)
+    error_setg(errp, "Memory hotplug not supported for this machine");
+#else
     PCDIMMDevice *dimm = PC_DIMM(dev);
     PCDIMMDeviceClass *ddc = PC_DIMM_GET_CLASS(dimm);
     MemoryRegion *mr;
@@ -3096,6 +3111,7 @@ static void spapr_memory_pre_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
 
 out:
     g_free(mem_dev);
+#endif
 }
 
 struct sPAPRDIMMState {
@@ -3209,6 +3225,9 @@ void spapr_lmb_release(DeviceState *dev)
 static void spapr_memory_unplug_request(HotplugHandler *hotplug_dev,
                                         DeviceState *dev, Error **errp)
 {
+#if !defined(CONFIG_RHV)
+    error_setg(errp, "Memory hot unplug not supported for this machine");
+#else
     sPAPRMachineState *spapr = SPAPR_MACHINE(hotplug_dev);
     Error *local_err = NULL;
     PCDIMMDevice *dimm = PC_DIMM(dev);
@@ -3263,6 +3282,7 @@ static void spapr_memory_unplug_request(HotplugHandler *hotplug_dev,
                                               nr_lmbs, spapr_drc_index(drc));
 out:
     error_propagate(errp, local_err);
+#endif
 }
 
 static void *spapr_populate_hotplug_cpu_dt(CPUState *cs, int *fdt_offset,
@@ -3314,6 +3334,7 @@ static
 void spapr_core_unplug_request(HotplugHandler *hotplug_dev, DeviceState *dev,
                                Error **errp)
 {
+#if defined(CONFIG_RHV)
     sPAPRMachineState *spapr = SPAPR_MACHINE(OBJECT(hotplug_dev));
     int index;
     sPAPRDRConnector *drc;
@@ -3336,6 +3357,9 @@ void spapr_core_unplug_request(HotplugHandler *hotplug_dev, DeviceState *dev,
     spapr_drc_detach(drc);
 
     spapr_hotplug_req_remove_by_index(drc);
+#else
+    error_setg(errp, "this feature or command is not currently supported");
+#endif /* CONFIG_RHV */
 }
 
 static void spapr_core_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
@@ -3475,28 +3499,6 @@ static void spapr_machine_device_plug(HotplugHandler *hotplug_dev,
         }
         if (node < 0 || node >= MAX_NODES) {
             error_setg(errp, "Invaild node %d", node);
-            return;
-        }
-
-        /*
-         * Currently PowerPC kernel doesn't allow hot-adding memory to
-         * memory-less node, but instead will silently add the memory
-         * to the first node that has some memory. This causes two
-         * unexpected behaviours for the user.
-         *
-         * - Memory gets hotplugged to a different node than what the user
-         *   specified.
-         * - Since pc-dimm subsystem in QEMU still thinks that memory belongs
-         *   to memory-less node, a reboot will set things accordingly
-         *   and the previously hotplugged memory now ends in the right node.
-         *   This appears as if some memory moved from one node to another.
-         *
-         * So until kernel starts supporting memory hotplug to memory-less
-         * nodes, just prevent such attempts upfront in QEMU.
-         */
-        if (nb_numa_nodes && !numa_info[node].node_mem) {
-            error_setg(errp, "Can't hotplug memory to memory-less node %d",
-                       node);
             return;
         }
 
@@ -3934,6 +3936,7 @@ static void spapr_machine_class_init(ObjectClass *oc, void *data)
     smc->default_caps.caps[SPAPR_CAP_SBBC] = SPAPR_CAP_BROKEN;
     smc->default_caps.caps[SPAPR_CAP_IBS] = SPAPR_CAP_BROKEN;
     spapr_caps_add_properties(smc, &error_abort);
+    smc->has_power9_support = true;
 }
 
 static const TypeInfo spapr_machine_info = {
@@ -3984,6 +3987,7 @@ static const TypeInfo spapr_machine_info = {
     }                                                                \
     type_init(spapr_machine_register_##suffix)
 
+#if 0 /* Disabled for Red Hat Enterprise Linux */
 /*
  * pseries-2.12
  */
@@ -4135,7 +4139,9 @@ DEFINE_SPAPR_MACHINE(2_8, "2.8", false);
         .property = "pre-2.8-migration",            \
         .value    = "on",                           \
     },
+#endif
 
+#if defined(CONFIG_RHV)
 static void phb_placement_2_7(sPAPRMachineState *spapr, uint32_t index,
                               uint64_t *buid, hwaddr *pio,
                               hwaddr *mmio32, hwaddr *mmio64,
@@ -4184,7 +4190,9 @@ static void phb_placement_2_7(sPAPRMachineState *spapr, uint32_t index,
      * window into contiguous 32-bit and 64-bit windows
      */
 }
+#endif /* CONFIG_RHV */
 
+#if 0 /* Disabled for Red Hat Enterprise Linux */
 static void spapr_machine_2_7_instance_options(MachineState *machine)
 {
     sPAPRMachineState *spapr = SPAPR_MACHINE(machine);
@@ -4344,6 +4352,257 @@ static void spapr_machine_2_1_class_options(MachineClass *mc)
     SET_MACHINE_COMPAT(mc, SPAPR_COMPAT_2_1);
 }
 DEFINE_SPAPR_MACHINE(2_1, "2.1", false);
+#endif
+
+/*
+ * pseries-rhel7.6.0
+ */
+
+static void spapr_machine_rhel760_instance_options(MachineState *machine)
+{
+}
+
+static void spapr_machine_rhel760_class_options(MachineClass *mc)
+{
+    /* Defaults for the latest behaviour inherited from the base class */
+}
+
+DEFINE_SPAPR_MACHINE(rhel760, "rhel7.6.0", true);
+
+/*
+ * pseries-rhel7.6.0-sxxm
+ *
+ * pseries-rhel7.6.0 with speculative execution exploit mitigations enabled by default
+ */
+static void spapr_machine_rhel760sxxm_instance_options(MachineState *machine)
+{
+    spapr_machine_rhel760_instance_options(machine);
+}
+
+static void spapr_machine_rhel760sxxm_class_options(MachineClass *mc)
+{
+    sPAPRMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
+
+    spapr_machine_rhel760_class_options(mc);
+    smc->default_caps.caps[SPAPR_CAP_CFPC] = SPAPR_CAP_WORKAROUND;
+    smc->default_caps.caps[SPAPR_CAP_SBBC] = SPAPR_CAP_WORKAROUND;
+    smc->default_caps.caps[SPAPR_CAP_IBS] = SPAPR_CAP_FIXED_CCD;
+}
+
+DEFINE_SPAPR_MACHINE(rhel760sxxm, "rhel7.6.0-sxxm", false);
+
+/*
+ * pseries-rhel7.5.0
+ * like SPAPR_COMPAT_2_11 and SPAPR_COMPAT_2_10
+ * SPAPR_CAP_HTM already enabled in 7.4
+ *
+ */
+#define SPAPR_COMPAT_RHEL7_5                                           \
+    HW_COMPAT_RHEL7_5                                                  \
+
+static void spapr_machine_rhel750_instance_options(MachineState *machine)
+{
+    spapr_machine_rhel760_instance_options(machine);
+}
+
+static void spapr_machine_rhel750_class_options(MachineClass *mc)
+{
+    spapr_machine_rhel760_class_options(mc);
+    SET_MACHINE_COMPAT(mc, SPAPR_COMPAT_RHEL7_5);
+}
+
+DEFINE_SPAPR_MACHINE(rhel750, "rhel7.5.0", false);
+
+/*
+ * pseries-rhel7.5.0-sxxm
+ *
+ * pseries-rhel7.5.0 with speculative execution exploit mitigations enabled by default
+ */
+static void spapr_machine_rhel750sxxm_instance_options(MachineState *machine)
+{
+    spapr_machine_rhel750_instance_options(machine);
+}
+
+static void spapr_machine_rhel750sxxm_class_options(MachineClass *mc)
+{
+    sPAPRMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
+
+    spapr_machine_rhel750_class_options(mc);
+    smc->default_caps.caps[SPAPR_CAP_CFPC] = SPAPR_CAP_WORKAROUND;
+    smc->default_caps.caps[SPAPR_CAP_SBBC] = SPAPR_CAP_WORKAROUND;
+    smc->default_caps.caps[SPAPR_CAP_IBS] = SPAPR_CAP_FIXED_CCD;
+}
+
+DEFINE_SPAPR_MACHINE(rhel750sxxm, "rhel7.5.0-sxxm", false);
+
+#if defined(CONFIG_RHV)
+
+/*
+ * pseries-rhel7.4.0
+ * like SPAPR_COMPAT_2_9
+ */
+
+#define SPAPR_COMPAT_RHEL7_4                                           \
+    HW_COMPAT_RHEL7_4                                                  \
+    {                                                                  \
+        .driver = TYPE_POWERPC_CPU,                                    \
+        .property = "pre-2.10-migration",                              \
+        .value    = "on",                                              \
+    },                                                                 \
+
+static void spapr_machine_rhel740_instance_options(MachineState *machine)
+{
+    spapr_machine_rhel750_instance_options(machine);
+}
+
+static void spapr_machine_rhel740_class_options(MachineClass *mc)
+{
+    sPAPRMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
+
+    spapr_machine_rhel750_class_options(mc);
+    SET_MACHINE_COMPAT(mc, SPAPR_COMPAT_RHEL7_4);
+    mc->numa_auto_assign_ram = numa_legacy_auto_assign_ram;
+    smc->has_power9_support = false;
+    smc->pre_2_10_has_unused_icps = true;
+    smc->resize_hpt_default = SPAPR_RESIZE_HPT_DISABLED;
+    smc->default_caps.caps[SPAPR_CAP_HTM] = SPAPR_CAP_ON;
+}
+
+DEFINE_SPAPR_MACHINE(rhel740, "rhel7.4.0", false);
+
+/*
+ * pseries-rhel7.4.0-sxxm
+ *
+ * pseries-rhel7.4.0 with speculative execution exploit mitigations enabled by default
+ */
+static void spapr_machine_rhel740sxxm_instance_options(MachineState *machine)
+{
+    spapr_machine_rhel740_instance_options(machine);
+}
+
+static void spapr_machine_rhel740sxxm_class_options(MachineClass *mc)
+{
+    sPAPRMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
+
+    spapr_machine_rhel740_class_options(mc);
+    smc->default_caps.caps[SPAPR_CAP_CFPC] = SPAPR_CAP_WORKAROUND;
+    smc->default_caps.caps[SPAPR_CAP_SBBC] = SPAPR_CAP_WORKAROUND;
+    smc->default_caps.caps[SPAPR_CAP_IBS] = SPAPR_CAP_FIXED_CCD;
+}
+
+DEFINE_SPAPR_MACHINE(rhel740sxxm, "rhel7.4.0-sxxm", false);
+
+/*
+ * pseries-rhel7.3.0
+ * like SPAPR_COMPAT_2_6/_2_7/_2_8 but "ddw" has been backported to RHEL7_3
+ */
+#define SPAPR_COMPAT_RHEL7_3 \
+    HW_COMPAT_RHEL7_3                               \
+    {                                               \
+        .driver   = TYPE_SPAPR_PCI_HOST_BRIDGE,     \
+        .property = "mem_win_size",                 \
+        .value    = stringify(SPAPR_PCI_2_7_MMIO_WIN_SIZE),\
+    },                                              \
+    {                                               \
+        .driver   = TYPE_SPAPR_PCI_HOST_BRIDGE,     \
+        .property = "mem64_win_size",               \
+        .value    = "0",                            \
+    },                                              \
+    {                                               \
+        .driver = TYPE_POWERPC_CPU,                 \
+        .property = "pre-2.8-migration",            \
+        .value    = "on",                           \
+    },                                              \
+    {                                               \
+        .driver = TYPE_SPAPR_PCI_HOST_BRIDGE,       \
+        .property = "pre-2.8-migration",            \
+        .value    = "on",                           \
+    },                                              \
+    {                                               \
+        .driver   = TYPE_SPAPR_PCI_HOST_BRIDGE,     \
+        .property = "pcie-extended-configuration-space",\
+        .value    = "off",                          \
+    },
+
+static void spapr_machine_rhel730_instance_options(MachineState *machine)
+{
+    sPAPRMachineState *spapr = SPAPR_MACHINE(machine);
+
+    spapr_machine_rhel740_instance_options(machine);
+    spapr->use_hotplug_event_source = false;
+}
+
+static void spapr_machine_rhel730_class_options(MachineClass *mc)
+{
+    sPAPRMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
+
+    spapr_machine_rhel740_class_options(mc);
+    mc->default_cpu_type = POWERPC_CPU_TYPE_NAME("power7_v2.3");
+    SET_MACHINE_COMPAT(mc, SPAPR_COMPAT_RHEL7_3);
+    smc->phb_placement = phb_placement_2_7;
+}
+
+DEFINE_SPAPR_MACHINE(rhel730, "rhel7.3.0", false);
+
+/*
+ * pseries-rhel7.3.0-sxxm
+ *
+ * pseries-rhel7.3.0 with speculative execution exploit mitigations enabled by default
+ */
+static void spapr_machine_rhel730sxxm_instance_options(MachineState *machine)
+{
+    spapr_machine_rhel730_instance_options(machine);
+}
+
+static void spapr_machine_rhel730sxxm_class_options(MachineClass *mc)
+{
+    sPAPRMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
+
+    spapr_machine_rhel730_class_options(mc);
+    smc->default_caps.caps[SPAPR_CAP_CFPC] = SPAPR_CAP_WORKAROUND;
+    smc->default_caps.caps[SPAPR_CAP_SBBC] = SPAPR_CAP_WORKAROUND;
+    smc->default_caps.caps[SPAPR_CAP_IBS] = SPAPR_CAP_FIXED_CCD;
+}
+
+DEFINE_SPAPR_MACHINE(rhel730sxxm, "rhel7.3.0-sxxm", false);
+
+/*
+ * pseries-rhel7.2.0
+ */
+/* Should be like SPAPR_COMPAT_2_5 + 2_4 + 2_3, but "dynamic-reconfiguration"
+ * has been backported to RHEL7_2 so we don't need it here.
+ */
+
+#define SPAPR_COMPAT_RHEL7_2 \
+    HW_COMPAT_RHEL7_2 \
+    { \
+        .driver   = "spapr-vlan", \
+        .property = "use-rx-buffer-pools", \
+        .value    = "off", \
+    },{ \
+        .driver   = TYPE_SPAPR_PCI_HOST_BRIDGE,\
+        .property = "ddw",\
+        .value    = stringify(off),\
+    },
+
+
+static void spapr_machine_rhel720_instance_options(MachineState *machine)
+{
+    spapr_machine_rhel730_instance_options(machine);
+}
+
+static void spapr_machine_rhel720_class_options(MachineClass *mc)
+{
+    sPAPRMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
+
+    spapr_machine_rhel730_class_options(mc);
+    smc->use_ohci_by_default = true;
+    mc->has_hotpluggable_cpus = NULL;
+    SET_MACHINE_COMPAT(mc, SPAPR_COMPAT_RHEL7_2);
+}
+
+DEFINE_SPAPR_MACHINE(rhel720, "rhel7.2.0", false);
+#endif /* CONFIG_RHV */
 
 static void spapr_machine_register_types(void)
 {

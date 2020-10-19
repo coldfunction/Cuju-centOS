@@ -1037,6 +1037,27 @@ assign_error:
     return r;
 }
 
+static int virtio_pci_set_host_notifier_mr(DeviceState *d, int n,
+                                           MemoryRegion *mr, bool assign)
+{
+    VirtIOPCIProxy *proxy = to_virtio_pci_proxy(d);
+    int offset;
+
+    if (n >= VIRTIO_QUEUE_MAX || !virtio_pci_modern(proxy) ||
+        virtio_pci_queue_mem_mult(proxy) != memory_region_size(mr)) {
+        return -1;
+    }
+
+    if (assign) {
+        offset = virtio_pci_queue_mem_mult(proxy) * n;
+        memory_region_add_subregion_overlap(&proxy->notify.mr, offset, mr, 1);
+    } else {
+        memory_region_del_subregion(&proxy->notify.mr, mr);
+    }
+
+    return 0;
+}
+
 static void virtio_pci_vmstate_change(DeviceState *d, bool running)
 {
     VirtIOPCIProxy *proxy = to_virtio_pci_proxy(d);
@@ -1983,7 +2004,7 @@ static const TypeInfo virtio_blk_pci_info = {
     .class_init    = virtio_blk_pci_class_init,
 };
 
-#if defined(CONFIG_VHOST_USER) && defined(CONFIG_LINUX)
+#if defined(CONFIG_VHOST_USER_BLK)
 /* vhost-user-blk */
 
 static Property vhost_user_blk_pci_properties[] = {
@@ -2163,7 +2184,7 @@ static const TypeInfo vhost_scsi_pci_info = {
 };
 #endif
 
-#if defined(CONFIG_VHOST_USER) && defined(CONFIG_LINUX)
+#if defined(CONFIG_VHOST_USER_SCSI)
 /* vhost-user-scsi-pci */
 static Property vhost_user_scsi_pci_properties[] = {
     DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors,
@@ -2422,7 +2443,7 @@ static void virtio_net_pci_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     VirtioPCIClass *vpciklass = VIRTIO_PCI_CLASS(klass);
 
-    k->romfile = "efi-virtio.rom";
+    k->romfile = "pxe-virtio.rom";
     k->vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET;
     k->device_id = PCI_DEVICE_ID_VIRTIO_NET;
     k->revision = VIRTIO_PCI_ABI_VERSION;
@@ -2652,6 +2673,7 @@ static void virtio_pci_bus_class_init(ObjectClass *klass, void *data)
     k->has_extra_state = virtio_pci_has_extra_state;
     k->query_guest_notifiers = virtio_pci_query_guest_notifiers;
     k->set_guest_notifiers = virtio_pci_set_guest_notifiers;
+    k->set_host_notifier_mr = virtio_pci_set_host_notifier_mr;
     k->vmstate_change = virtio_pci_vmstate_change;
     k->pre_plugged = virtio_pci_pre_plugged;
     k->device_plugged = virtio_pci_device_plugged;
@@ -2686,7 +2708,7 @@ static void virtio_pci_register_types(void)
     type_register_static(&virtio_9p_pci_info);
 #endif
     type_register_static(&virtio_blk_pci_info);
-#if defined(CONFIG_VHOST_USER) && defined(CONFIG_LINUX)
+#if defined(CONFIG_VHOST_USER_BLK)
     type_register_static(&vhost_user_blk_pci_info);
 #endif
     type_register_static(&virtio_scsi_pci_info);
@@ -2696,7 +2718,7 @@ static void virtio_pci_register_types(void)
 #ifdef CONFIG_VHOST_SCSI
     type_register_static(&vhost_scsi_pci_info);
 #endif
-#if defined(CONFIG_VHOST_USER) && defined(CONFIG_LINUX)
+#if defined(CONFIG_VHOST_USER_SCSI)
     type_register_static(&vhost_user_scsi_pci_info);
 #endif
 #ifdef CONFIG_VHOST_VSOCK

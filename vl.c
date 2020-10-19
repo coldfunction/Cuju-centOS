@@ -129,11 +129,18 @@ int main(int argc, char **argv)
 #include "qapi/qapi-commands-block-core.h"
 #include "qapi/qapi-commands-misc.h"
 #include "qapi/qapi-commands-run-state.h"
+#include "qapi/qapi-commands-ui.h"
 #include "qapi/qmp/qerror.h"
 #include "sysemu/iothread.h"
 
 #define MAX_VIRTIO_CONSOLES 1
 #define MAX_SCLP_CONSOLES 1
+
+#if defined(CONFIG_RHV)
+#define RHEL_MAX_CPUS 384
+#else
+#define RHEL_MAX_CPUS 240
+#endif
 
 static const char *data_dir[16];
 static int data_dir_idx;
@@ -165,7 +172,7 @@ unsigned int max_cpus;
 int smp_cores = 1;
 int smp_threads = 1;
 int acpi_enabled = 1;
-int no_hpet = 0;
+int no_hpet = 1; /* Always disabled for Red Hat Enterprise Linux */
 int fd_bootchk = 1;
 static int no_reboot;
 int no_shutdown = 0;
@@ -185,6 +192,7 @@ bool boot_strict;
 uint8_t *boot_splash_filedata;
 size_t boot_splash_filedata_size;
 uint8_t qemu_extra_params_fw[2];
+int only_migratable; /* turn it off unless user states otherwise */
 
 int icount_align_option;
 
@@ -1264,6 +1272,54 @@ static void default_drive(int enable, int snapshot, BlockInterfaceType type,
 
 }
 
+typedef struct BlockdevOptionsQueueEntry {
+    BlockdevOptions *bdo;
+    Location loc;
+    QSIMPLEQ_ENTRY(BlockdevOptionsQueueEntry) entry;
+} BlockdevOptionsQueueEntry;
+
+typedef QSIMPLEQ_HEAD(, BlockdevOptionsQueueEntry) BlockdevOptionsQueue;
+
+static void configure_blockdev(BlockdevOptionsQueue *bdo_queue,
+                               MachineClass *machine_class, int snapshot)
+{
+    /*
+     * If the currently selected machine wishes to override the
+     * units-per-bus property of its default HBA interface type, do so
+     * now.
+     */
+    if (machine_class->units_per_default_bus) {
+        override_max_devs(machine_class->block_default_type,
+                          machine_class->units_per_default_bus);
+    }
+
+    /* open the virtual block devices */
+    while (!QSIMPLEQ_EMPTY(bdo_queue)) {
+        BlockdevOptionsQueueEntry *bdo = QSIMPLEQ_FIRST(bdo_queue);
+
+        QSIMPLEQ_REMOVE_HEAD(bdo_queue, entry);
+        loc_push_restore(&bdo->loc);
+        qmp_blockdev_add(bdo->bdo, &error_fatal);
+        loc_pop(&bdo->loc);
+        qapi_free_BlockdevOptions(bdo->bdo);
+        g_free(bdo);
+    }
+    if (snapshot || replay_mode != REPLAY_MODE_NONE) {
+        qemu_opts_foreach(qemu_find_opts("drive"), drive_enable_snapshot,
+                          NULL, NULL);
+    }
+    if (qemu_opts_foreach(qemu_find_opts("drive"), drive_init_func,
+                          &machine_class->block_default_type, NULL)) {
+        exit(1);
+    }
+
+    default_drive(default_cdrom, snapshot, machine_class->block_default_type, 2,
+                  CDROM_OPTS);
+    default_drive(default_floppy, snapshot, IF_FLOPPY, 0, FD_OPTS);
+    default_drive(default_sdcard, snapshot, IF_SD, 0, SD_OPTS);
+
+}
+
 static QemuOptsList qemu_smp_opts = {
     .name = "smp-opts",
     .implied_opt_name = "cpus",
@@ -1520,6 +1576,20 @@ MachineClass *find_default_machine(void)
     return mc;
 }
 
+/* Maximum number of CPUs limited for Red Hat Enterprise Linux */
+static void limit_max_cpus_in_machines(void)
+{
+    GSList *el, *machines = object_class_get_list(TYPE_MACHINE, false);
+
+    for (el = machines; el; el = el->next) {
+        MachineClass *mc = el->data;
+
+        if (mc->max_cpus > RHEL_MAX_CPUS) {
+            mc->max_cpus = RHEL_MAX_CPUS;
+        }
+    }
+}
+
 MachineInfoList *qmp_query_machines(Error **errp)
 {
     GSList *el, *machines = object_class_get_list(TYPE_MACHINE, false);
@@ -1588,28 +1658,58 @@ static int machine_help_func(QemuOpts *opts, MachineState *machine)
 struct vm_change_state_entry {
     VMChangeStateHandler *cb;
     void *opaque;
-    QLIST_ENTRY (vm_change_state_entry) entries;
+    QTAILQ_ENTRY(vm_change_state_entry) entries;
+    int priority;
 };
 
-static QLIST_HEAD(vm_change_state_head, vm_change_state_entry) vm_change_state_head;
+static QTAILQ_HEAD(VMChangeStateHead,
+                   vm_change_state_entry) vm_change_state_head;
+
+/**
+ * qemu_add_vm_change_state_handler_prio:
+ * @cb: the callback to invoke
+ * @opaque: user data passed to the callback
+ * @priority: low priorities execute first when the vm runs and the reverse is
+ *            true when the vm stops
+ *
+ * Register a callback function that is invoked when the vm starts or stops
+ * running.
+ *
+ * Returns: an entry to be freed using qemu_del_vm_change_state_handler()
+ */
+VMChangeStateEntry *qemu_add_vm_change_state_handler_prio(
+        VMChangeStateHandler *cb, void *opaque, int priority)
+{
+    VMChangeStateEntry *e;
+    VMChangeStateEntry *other;
+
+    e = g_malloc0(sizeof(*e));
+    e->cb = cb;
+    e->opaque = opaque;
+    e->priority = priority;
+
+    /* Keep list sorted in ascending priority order */
+    QTAILQ_FOREACH(other, &vm_change_state_head, entries) {
+        if (priority < other->priority) {
+            QTAILQ_INSERT_BEFORE(other, e, entries);
+            return e;
+        }
+    }
+
+    QTAILQ_INSERT_TAIL(&vm_change_state_head, e, entries);
+    return e;
+}
 
 VMChangeStateEntry *qemu_add_vm_change_state_handler(VMChangeStateHandler *cb,
                                                      void *opaque)
 {
-    VMChangeStateEntry *e;
-
-    e = g_malloc0(sizeof (*e));
-
-    e->cb = cb;
-    e->opaque = opaque;
-    QLIST_INSERT_HEAD(&vm_change_state_head, e, entries);
-    return e;
+    return qemu_add_vm_change_state_handler_prio(cb, opaque, 0);
 }
 
 void qemu_del_vm_change_state_handler(VMChangeStateEntry *e)
 {
-    QLIST_REMOVE (e, entries);
-    g_free (e);
+    QTAILQ_REMOVE(&vm_change_state_head, e, entries);
+    g_free(e);
 }
 
 void vm_state_notify(int running, RunState state)
@@ -1618,8 +1718,15 @@ void vm_state_notify(int running, RunState state)
 
     trace_vm_state_notify(running, state);
 
-    QLIST_FOREACH_SAFE(e, &vm_change_state_head, entries, next) {
-        e->cb(e->opaque, running, state);
+    if (running) {
+        QTAILQ_FOREACH_SAFE(e, &vm_change_state_head, entries, next) {
+            e->cb(e->opaque, running, state);
+        }
+    } else {
+        QTAILQ_FOREACH_REVERSE_SAFE(e, &vm_change_state_head,
+                                    VMChangeStateHead, entries, next) {
+            e->cb(e->opaque, running, state);
+        }
     }
 }
 
@@ -1953,9 +2060,17 @@ static void version(void)
            QEMU_COPYRIGHT "\n");
 }
 
+static void print_rh_warning(void)
+{
+    printf("\nWARNING: Direct use of qemu-kvm from the command line is not supported by Red Hat.\n"
+             "WARNING: Use libvirt as the stable management interface.\n"
+             "WARNING: Some command line options listed here may not be available in future releases.\n\n");
+}
+
 static void help(int exitcode)
 {
     version();
+    print_rh_warning();
     printf("usage: %s [options] [disk_image]\n\n"
            "'disk_image' is a raw hard disk image for IDE hard disk 0\n\n",
             error_get_progname());
@@ -1972,6 +2087,7 @@ static void help(int exitcode)
            "\n"
            QEMU_HELP_BOTTOM "\n");
 
+    print_rh_warning();
     exit(exitcode);
 }
 
@@ -2090,6 +2206,14 @@ static void select_vgahw(const char *p)
     }
 }
 
+DisplayOptions *qmp_query_display_options(Error **errp)
+{
+    DisplayOptions *r = g_new0(DisplayOptions, 1);
+
+    r->type = dpy.type;
+    return r;
+}
+
 static void parse_display(const char *p)
 {
     const char *opts;
@@ -2164,6 +2288,15 @@ static void parse_display(const char *p)
         }
     } else if (strstart(p, "egl-headless", &opts)) {
         dpy.type = DISPLAY_TYPE_EGL_HEADLESS;
+        if (*opts) {
+            const char *nextopt;
+            if (strstart(opts, ",rendernode=", &nextopt)) {
+                dpy.u.egl_headless.rendernode = strdup(nextopt);
+            } else {
+                error_report("invalid egl-headless option string");
+                exit(1);
+            }
+        }
     } else if (strstart(p, "curses", &opts)) {
         dpy.type = DISPLAY_TYPE_CURSES;
     } else if (strstart(p, "gtk", &opts)) {
@@ -2830,8 +2963,7 @@ static int machine_set_property(void *opaque,
  */
 static bool object_create_initial(const char *type)
 {
-    if (g_str_equal(type, "rng-egd") ||
-        g_str_has_prefix(type, "pr-manager-")) {
+    if (g_str_equal(type, "rng-egd")) {
         return false;
     }
 
@@ -2923,6 +3055,7 @@ static void set_memory_options(uint64_t *ram_slots, ram_addr_t *maxram_size,
     }
 
     sz = QEMU_ALIGN_UP(sz, 8192);
+    sz = MAX(sz, 2 * 1024 * 1024);
     ram_size = sz;
     if (ram_size != sz) {
         error_report("ram size too large");
@@ -3004,19 +3137,6 @@ static void user_register_global_props(void)
                       global_init_func, NULL, NULL);
 }
 
-/*
- * Note: we should see that these properties are actually having a
- * priority: accel < machine < user. This means e.g. when user
- * specifies something in "-global", it'll always be used with highest
- * priority than either machine/accelerator compat properties.
- */
-static void register_global_properties(MachineState *ms)
-{
-    accel_register_compat_props(ms->accelerator);
-    machine_register_compat_props(ms);
-    user_register_global_props();
-}
-
 int main(int argc, char **argv, char **envp)
 {
     int i;
@@ -3052,13 +3172,7 @@ int main(int argc, char **argv, char **envp)
     Error *err = NULL;
     bool list_data_dirs = false;
     char *dir, **dirs;
-    typedef struct BlockdevOptions_queue {
-        BlockdevOptions *bdo;
-        Location loc;
-        QSIMPLEQ_ENTRY(BlockdevOptions_queue) entry;
-    } BlockdevOptions_queue;
-    QSIMPLEQ_HEAD(, BlockdevOptions_queue) bdo_queue
-        = QSIMPLEQ_HEAD_INITIALIZER(bdo_queue);
+    BlockdevOptionsQueue bdo_queue = QSIMPLEQ_HEAD_INITIALIZER(bdo_queue);
 
     module_call_init(MODULE_INIT_TRACE);
 
@@ -3078,6 +3192,7 @@ int main(int argc, char **argv, char **envp)
     qemu_add_drive_opts(&qemu_common_drive_opts);
     qemu_add_drive_opts(&qemu_drive_opts);
     qemu_add_drive_opts(&bdrv_runtime_opts);
+    qemu_add_opts(&qemu_simple_drive_opts);
     qemu_add_opts(&qemu_chardev_opts);
     qemu_add_opts(&qemu_device_opts);
     qemu_add_opts(&qemu_netdev_opts);
@@ -3108,6 +3223,7 @@ int main(int argc, char **argv, char **envp)
 
     runstate_init();
     postcopy_infrastructure_init();
+    monitor_init_globals();
 
     if (qcrypto_init(&err) < 0) {
         error_reportf_err(err, "cannot initialize crypto: ");
@@ -3115,7 +3231,7 @@ int main(int argc, char **argv, char **envp)
     }
     rtc_clock = QEMU_CLOCK_HOST;
 
-    QLIST_INIT (&vm_change_state_head);
+    QTAILQ_INIT(&vm_change_state_head);
     os_setup_early_signal_handling();
 
     cpu_model = NULL;
@@ -3187,7 +3303,7 @@ int main(int argc, char **argv, char **envp)
             case QEMU_OPTION_blockdev:
                 {
                     Visitor *v;
-                    BlockdevOptions_queue *bdo;
+                    BlockdevOptionsQueueEntry *bdo;
 
                     v = qobject_input_visitor_new_str(optarg, "driver", &err);
                     if (!v) {
@@ -3195,7 +3311,7 @@ int main(int argc, char **argv, char **envp)
                         exit(1);
                     }
 
-                    bdo = g_new(BlockdevOptions_queue, 1);
+                    bdo = g_new(BlockdevOptionsQueueEntry, 1);
                     visit_type_BlockdevOptions(v, NULL, &bdo->bdo,
                                                &error_fatal);
                     visit_free(v);
@@ -3915,13 +4031,7 @@ int main(int argc, char **argv, char **envp)
                 incoming = optarg;
                 break;
             case QEMU_OPTION_only_migratable:
-                /*
-                 * TODO: we can remove this option one day, and we
-                 * should all use:
-                 *
-                 * "-global migration.only-migratable=true"
-                 */
-                qemu_global_option("migration.only-migratable=true");
+                only_migratable = 1;
                 break;
             case QEMU_OPTION_nodefaults:
                 has_defaults = 0;
@@ -4071,9 +4181,15 @@ int main(int argc, char **argv, char **envp)
      */
     loc_set_none();
 
+    user_register_global_props();
+
     replay_configure(icount_opts);
 
+    /* Maximum number of CPUs limited for Red Hat Enterprise Linux */
+    limit_max_cpus_in_machines();
+
     machine_class = select_machine();
+    machine_register_compat_props(machine_class);
 
     set_memory_options(&ram_slots, &maxram_size, machine_class);
 
@@ -4119,6 +4235,10 @@ int main(int argc, char **argv, char **envp)
     }
     object_property_add_child(object_get_root(), "machine",
                               OBJECT(current_machine), &error_abort);
+    object_property_add_child(container_get(OBJECT(current_machine),
+                                            "/unattached"),
+                              "sysbus", OBJECT(sysbus_get_default()),
+                              NULL);
 
     if (machine_class->minimum_page_bits) {
         if (!set_preferred_target_page_bits(machine_class->minimum_page_bits)) {
@@ -4355,11 +4475,9 @@ int main(int argc, char **argv, char **envp)
     page_size_init();
     socket_init();
 
-    if (qemu_opts_foreach(qemu_find_opts("object"),
-                          user_creatable_add_opts_foreach,
-                          object_create_initial, NULL)) {
-        exit(1);
-    }
+    qemu_opts_foreach(qemu_find_opts("object"),
+                      user_creatable_add_opts_foreach,
+                      object_create_initial, &error_fatal);
 
     if (qemu_opts_foreach(qemu_find_opts("chardev"),
                           chardev_init_func, NULL, NULL)) {
@@ -4378,6 +4496,13 @@ int main(int argc, char **argv, char **envp)
         exit(0);
     }
 
+    /*
+     * Note: we need to create block backends before
+     * machine_set_property(), so machine properties can refer to
+     * them.
+     */
+    configure_blockdev(&bdo_queue, machine_class, snapshot);
+
     machine_opts = qemu_get_machine_opts();
     if (qemu_opt_foreach(machine_opts, machine_set_property, current_machine,
                          NULL)) {
@@ -4386,12 +4511,6 @@ int main(int argc, char **argv, char **envp)
     }
 
     configure_accelerator(current_machine);
-
-    /*
-     * Register all the global properties, including accel properties,
-     * machine properties, and user-specified ones.
-     */
-    register_global_properties(current_machine);
 
     /*
      * Migration object can only be created after global properties
@@ -4485,11 +4604,9 @@ int main(int argc, char **argv, char **envp)
         exit(1);
     }
 
-    if (qemu_opts_foreach(qemu_find_opts("object"),
-                          user_creatable_add_opts_foreach,
-                          object_create_delayed, NULL)) {
-        exit(1);
-    }
+    qemu_opts_foreach(qemu_find_opts("object"),
+                      user_creatable_add_opts_foreach,
+                      object_create_delayed, &error_fatal);
 
     if (tpm_init() < 0) {
         exit(1);
@@ -4510,44 +4627,6 @@ int main(int argc, char **argv, char **envp)
     blk_mig_init();
     ram_mig_init();
     dirty_bitmap_mig_init();
-
-    /* If the currently selected machine wishes to override the units-per-bus
-     * property of its default HBA interface type, do so now. */
-    if (machine_class->units_per_default_bus) {
-        override_max_devs(machine_class->block_default_type,
-                          machine_class->units_per_default_bus);
-    }
-
-    /* open the virtual block devices */
-    while (!QSIMPLEQ_EMPTY(&bdo_queue)) {
-        BlockdevOptions_queue *bdo = QSIMPLEQ_FIRST(&bdo_queue);
-
-        QSIMPLEQ_REMOVE_HEAD(&bdo_queue, entry);
-        loc_push_restore(&bdo->loc);
-        qmp_blockdev_add(bdo->bdo, &error_fatal);
-        loc_pop(&bdo->loc);
-        qapi_free_BlockdevOptions(bdo->bdo);
-        g_free(bdo);
-    }
-    if (snapshot || replay_mode != REPLAY_MODE_NONE) {
-        qemu_opts_foreach(qemu_find_opts("drive"), drive_enable_snapshot,
-                          NULL, NULL);
-    }
-    if (qemu_opts_foreach(qemu_find_opts("drive"), drive_init_func,
-                          &machine_class->block_default_type, NULL)) {
-        exit(1);
-    }
-
-    default_drive(default_cdrom, snapshot, machine_class->block_default_type, 2,
-                  CDROM_OPTS);
-    default_drive(default_floppy, snapshot, IF_FLOPPY, 0, FD_OPTS);
-    default_drive(default_sdcard, snapshot, IF_SD, 0, SD_OPTS);
-
-    /*
-     * Note: qtest_enabled() (which is used in monitor_qapi_event_init())
-     * depends on configure_accelerator() above.
-     */
-    monitor_init_globals();
 
     if (qemu_opts_foreach(qemu_find_opts("mon"),
                           mon_init_func, NULL, NULL)) {
@@ -4738,6 +4817,7 @@ int main(int argc, char **argv, char **envp)
     /* No more vcpu or device emulation activity beyond this point */
     vm_shutdown();
 
+    job_cancel_sync_all();
     bdrv_close_all();
 
     res_free();

@@ -140,9 +140,8 @@ static void parse_numa_distance(NumaDistOptions *dist, Error **errp)
     uint8_t val = dist->val;
 
     if (src >= MAX_NODES || dst >= MAX_NODES) {
-        error_setg(errp,
-                   "Invalid node %d, max possible could be %d",
-                   MAX(src, dst), MAX_NODES);
+        error_setg(errp, "Parameter '%s' expects an integer between 0 and %d",
+                   src >= MAX_NODES ? "src" : "dst", MAX_NODES - 1);
         return;
     }
 
@@ -457,7 +456,7 @@ static void allocate_system_memory_nonnuma(MemoryRegion *mr, Object *owner,
     if (mem_path) {
 #ifdef __linux__
         Error *err = NULL;
-        memory_region_init_ram_from_file(mr, owner, name, ram_size, 0, false,
+        memory_region_init_ram_from_file(mr, owner, name, ram_size, 0, 0,
                                          mem_path, &err);
         if (err) {
             error_report_err(err);
@@ -493,6 +492,19 @@ void memory_region_allocate_system_memory(MemoryRegion *mr, Object *owner,
         return;
     }
 
+    /* The shadow_bios_after_incoming hack at savevm.c:shadow_bios() is not
+     * able to handle the multiple memory blocks added when using NUMA
+     * memdevs. We can disallow -numa memdev= when using rhel6.* machine-types
+     * because RHEL-6 didn't support the NUMA memdev option.
+     */
+    if (shadow_bios_after_incoming) {
+        MachineClass *mc;
+        mc = MACHINE_GET_CLASS(current_machine);
+        error_report("-numa memdev is not supported by machine %s",
+                     mc->name);
+        exit(1);
+    }
+
     memory_region_init(mr, owner, name, ram_size);
     for (i = 0; i < nb_numa_nodes; i++) {
         uint64_t size = numa_info[i].node_mem;
@@ -500,8 +512,7 @@ void memory_region_allocate_system_memory(MemoryRegion *mr, Object *owner,
         if (!backend) {
             continue;
         }
-        MemoryRegion *seg = host_memory_backend_get_memory(backend,
-                                                           &error_fatal);
+        MemoryRegion *seg = host_memory_backend_get_memory(backend);
 
         if (memory_region_is_mapped(seg)) {
             char *path = object_get_canonical_path_component(OBJECT(backend));

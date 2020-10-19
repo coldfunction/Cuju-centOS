@@ -277,6 +277,9 @@ static int cpu_post_load(void *opaque, int version_id)
     env->hflags &= ~HF_CPL_MASK;
     env->hflags |= (env->segs[R_SS].flags >> DESC_DPL_SHIFT) & HF_CPL_MASK;
 
+    if (!(env->pat))
+        env->pat = MSR_PAT_DEFAULT;
+
     env->fpstt = (env->fpus_vmstate >> 11) & 7;
     env->fpus = env->fpus_vmstate & ~0x3800;
     env->fptag_vmstate ^= 0xff;
@@ -322,6 +325,14 @@ static bool steal_time_msr_needed(void *opaque)
     return cpu->env.steal_time_msr != 0;
 }
 
+/* Poll control MSR enabled by default */
+static bool poll_control_msr_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+
+    return cpu->env.poll_control_msr != 1;
+}
+
 static const VMStateDescription vmstate_steal_time_msr = {
     .name = "cpu/steal_time_msr",
     .version_id = 1,
@@ -351,6 +362,17 @@ static const VMStateDescription vmstate_pv_eoi_msr = {
     .needed = pv_eoi_msr_needed,
     .fields = (VMStateField[]) {
         VMSTATE_UINT64(env.pv_eoi_en_msr, X86CPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_poll_control_msr = {
+    .name = "cpu/poll_control_msr",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = poll_control_msr_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT64(env.poll_control_msr, X86CPU),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -893,6 +915,64 @@ static const VMStateDescription vmstate_msr_intel_pt = {
     }
 };
 
+static bool vmstate_xsave_needed(void *opaque)
+{
+    /* The xsave state is already on the main "cpu" section */
+    return false;
+}
+
+static const VMStateDescription vmstate_xsave ={
+    .name = "cpu/xsave",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .minimum_version_id_old = 1,
+    .needed = vmstate_xsave_needed,
+    .fields      = (VMStateField []) {
+    VMSTATE_UINT64_V(env.xcr0, X86CPU, 1),
+    VMSTATE_UINT64_V(env.xstate_bv, X86CPU, 1),
+    VMSTATE_YMMH_REGS_VARS(env.xmm_regs, X86CPU, CPU_NB_REGS, 1),
+    VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool virt_ssbd_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+    CPUX86State *env = &cpu->env;
+
+    return env->virt_ssbd != 0;
+}
+
+static const VMStateDescription vmstate_msr_virt_ssbd = {
+    .name = "cpu/virt_ssbd",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = virt_ssbd_needed,
+    .fields = (VMStateField[]){
+        VMSTATE_UINT64(env.virt_ssbd, X86CPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool msr_tsx_ctrl_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+    CPUX86State *env = &cpu->env;
+
+    return env->features[FEAT_ARCH_CAPABILITIES] & ARCH_CAP_TSX_CTRL_MSR;
+}
+
+static const VMStateDescription vmstate_msr_tsx_ctrl = {
+    .name = "cpu/msr_tsx_ctrl",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = msr_tsx_ctrl_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(env.tsx_ctrl, X86CPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 VMStateDescription vmstate_x86_cpu = {
     .name = "cpu",
     .version_id = 12,
@@ -991,6 +1071,7 @@ VMStateDescription vmstate_x86_cpu = {
         &vmstate_async_pf_msr,
         &vmstate_pv_eoi_msr,
         &vmstate_steal_time_msr,
+        &vmstate_poll_control_msr,
         &vmstate_fpop_ip_dp,
         &vmstate_msr_tsc_adjust,
         &vmstate_msr_tscdeadline,
@@ -1015,6 +1096,9 @@ VMStateDescription vmstate_x86_cpu = {
         &vmstate_spec_ctrl,
         &vmstate_mcg_ext_ctl,
         &vmstate_msr_intel_pt,
+        &vmstate_xsave,
+        &vmstate_msr_virt_ssbd,
+        &vmstate_msr_tsx_ctrl,
         NULL
     }
 };

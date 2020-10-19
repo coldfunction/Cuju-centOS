@@ -441,13 +441,25 @@ static void ich9_pm_set_enable_tco(Object *obj, bool value, Error **errp)
     s->pm.enable_tco = value;
 }
 
+static bool ich9_pm_get_force_rev1_fadt(Object *obj, Error **errp)
+{
+    ICH9LPCState *s = ICH9_LPC_DEVICE(obj);
+    return s->pm.force_rev1_fadt;
+}
+
+static void ich9_pm_set_force_rev1_fadt(Object *obj, bool value, Error **errp)
+{
+    ICH9LPCState *s = ICH9_LPC_DEVICE(obj);
+    s->pm.force_rev1_fadt = value;
+}
+
 void ich9_pm_add_properties(Object *obj, ICH9LPCPMRegs *pm, Error **errp)
 {
     static const uint32_t gpe0_len = ICH9_PMIO_GPE0_LEN;
     pm->acpi_memory_hotplug.is_enabled = true;
     pm->cpu_hotplug_legacy = true;
-    pm->disable_s3 = 0;
-    pm->disable_s4 = 0;
+    pm->disable_s3 = 1;
+    pm->disable_s4 = 1;
     pm->s4_val = 2;
 
     object_property_add_uint32_ptr(obj, ACPI_PM_PROP_PM_IO_BASE,
@@ -464,6 +476,10 @@ void ich9_pm_add_properties(Object *obj, ICH9LPCPMRegs *pm, Error **errp)
     object_property_add_bool(obj, "cpu-hotplug-legacy",
                              ich9_pm_get_cpu_hotplug_legacy,
                              ich9_pm_set_cpu_hotplug_legacy,
+                             NULL);
+    object_property_add_bool(obj, "__com.redhat_force-rev1-fadt",
+                             ich9_pm_get_force_rev1_fadt,
+                             ich9_pm_set_force_rev1_fadt,
                              NULL);
     object_property_add(obj, ACPI_PM_PROP_S3_DISABLED, "uint8",
                         ich9_pm_get_disable_s3,

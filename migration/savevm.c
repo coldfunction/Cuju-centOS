@@ -45,6 +45,7 @@
 #include "qapi/qapi-commands-misc.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/error-report.h"
+#include "qemu/rcu_queue.h"
 #include "sysemu/cpus.h"
 #include "exec/memory.h"
 #include "exec/target_page.h"
@@ -83,6 +84,7 @@ enum qemu_vm_cmd {
     MIG_CMD_PACKAGED,          /* Send a wrapped stream within this stream */
     MIG_CMD_MAX
 };
+bool shadow_bios_after_incoming;
 
 #define MAX_VM_CMD_PACKAGED_SIZE UINT32_MAX
 static struct mig_cmd_args {
@@ -1619,6 +1621,7 @@ static void *postcopy_ram_listen_thread(void *opaque)
     migration_incoming_state_destroy();
     qemu_loadvm_state_cleanup();
 
+    mis->have_listen_thread = false;
     return NULL;
 }
 
@@ -2143,11 +2146,13 @@ int qemu_loadvm_state(QEMUFile *f)
     if (migrate_get_current()->send_configuration) {
         if (qemu_get_byte(f) != QEMU_VM_CONFIGURATION) {
             error_report("Configuration section missing");
+            qemu_loadvm_state_cleanup();
             return -EINVAL;
         }
         ret = vmstate_load_state(f, &vmstate_configuration, &savevm_state, 0);
 
         if (ret) {
+            qemu_loadvm_state_cleanup();
             return ret;
         }
     }
@@ -2204,6 +2209,13 @@ int qemu_loadvm_state(QEMUFile *f)
     }
 
     qemu_loadvm_state_cleanup();
+    /* Supplement SeaBIOS's shadowing now, because it was useless when the
+     * incoming VM started on the RHEL-6 emulator.
+     */
+    if (shadow_bios_after_incoming) {
+        shadow_bios();
+    }
+
     cpu_synchronize_all_post_init();
 
     return ret;
@@ -2501,11 +2513,13 @@ void vmstate_register_ram(MemoryRegion *mr, DeviceState *dev)
 {
     qemu_ram_set_idstr(mr->ram_block,
                        memory_region_name(mr), dev);
+    qemu_ram_set_migratable(mr->ram_block);
 }
 
 void vmstate_unregister_ram(MemoryRegion *mr, DeviceState *dev)
 {
     qemu_ram_unset_idstr(mr->ram_block);
+    qemu_ram_unset_migratable(mr->ram_block);
 }
 
 void vmstate_register_ram_global(MemoryRegion *mr)
@@ -2516,7 +2530,7 @@ void vmstate_register_ram_global(MemoryRegion *mr)
 bool vmstate_check_only_migratable(const VMStateDescription *vmsd)
 {
     /* check needed if --only-migratable is specified */
-    if (!migrate_get_current()->only_migratable) {
+    if (!only_migratable) {
         return true;
     }
 

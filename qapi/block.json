@@ -78,6 +78,33 @@
   'data': { 'device': 'str', 'name': 'str' } }
 
 ##
+# @PRManagerInfo:
+#
+# Information about a persistent reservation manager
+#
+# @id: the identifier of the persistent reservation manager
+#
+# @connected: true if the persistent reservation manager is connected to
+#             the underlying storage or helper
+#
+# Since: 3.0
+##
+{ 'struct': 'PRManagerInfo',
+  'data': {'id': 'str', 'connected': 'bool'} }
+
+##
+# @query-pr-managers:
+#
+# Returns a list of information about each persistent reservation manager.
+#
+# Returns: a list of @PRManagerInfo for each persistent reservation manager
+#
+# Since: 3.0
+##
+{ 'command': 'query-pr-managers', 'returns': ['PRManagerInfo'] }
+
+
+##
 # @blockdev-snapshot-internal-sync:
 #
 # Synchronously take an internal snapshot of a block device, when the
@@ -188,6 +215,74 @@
             '*force': 'bool' } }
 
 ##
+# @__com.redhat_drive_del:
+#
+# Remove host block device.
+#
+# Remove host block device.  The result is that guest generated IO is no longer
+# submitted against the host device underlying the disk.  Once a drive has
+# been deleted, the QEMU Block layer returns -EIO which results in IO
+# errors in the guest for applications that are reading/writing to the device.
+# These errors are always reported to the guest, regardless of the drive's error
+# actions (drive options rerror, werror).
+#
+# @id: the device's ID
+#
+# Example:
+#
+# -> { "execute": "__com.redhat_drive_del", "arguments": { "id": "block1" } }
+# <- { "return": {} }
+#
+##
+{ 'command': '__com.redhat_drive_del',
+  'data': { 'id': 'str' } }
+
+##
+# @__com.redhat_drive_add:
+#
+# Create a drive similar to -drive if=none.
+#
+# @id: Drive ID, must be unique
+# @file: Disk image
+# @format: Disk format
+# @aio: How to perform asynchronous disk I/O
+# @cache: Host cache use policy
+# @cyls, "heads", "secs": Disk geometry
+# @trans: BIOS translation mode
+# @media: Media type
+# @readonly: Open image read-only
+# @rerror: What to do on read error
+# @werror: What to do on write error
+# @serial: Drive serial number
+# @snapshot: Enable snapshot mode
+# @copy-on-read: Enable copy-on-read mode
+#
+# Example:
+#
+# 1. Add a drive without medium:
+#
+# -> { "execute": "__com.redhat_drive_add", "arguments": { "id": "foo" } }
+# <- {"return": {}}
+#
+# 2. Add a drive with medium:
+#
+# -> { "execute": "__com.redhat_drive_add",
+#      "arguments": { "id": "bar", "file": "tmp.qcow2", "format": "qcow2" } }
+# <- {"return": {}}
+#
+##
+{ 'command': '__com.redhat_drive_add',
+  'data': { 'id': 'str', '*file': 'str', '*format': 'str',
+            '*aio': 'BlockdevAioOptions',
+            '*cache': 'BlockdevCacheOptions',
+            '*cyls': 'int', '*heads': 'int', '*secs': 'int',
+            '*trans': 'str', '*media': 'str',
+            '*readonly': 'bool', '*snapshot': 'bool',
+            '*rerror': 'str', '*werror': 'str',
+            '*copy-on-read': 'bool', '*serial': 'str' },
+  'gen': false }                # just to minimize porting churn
+
+##
 # @nbd-server-start:
 #
 # Start an NBD server listening on the given host and port.  Block
@@ -218,6 +313,10 @@
 #
 # @writable: Whether clients should be able to write to the device via the
 #     NBD connection (default false).
+
+# @bitmap: Also export the dirty bitmap reachable from @device, so the
+#          NBD client can use NBD_OPT_SET_META_CONTEXT with
+#          "qemu:dirty-bitmap:NAME" to inspect the bitmap. (since 4.0)
 #
 # Returns: error if the server is not running, or export with the same name
 #          already exists.
@@ -225,7 +324,8 @@
 # Since: 1.3.0
 ##
 { 'command': 'nbd-server-add',
-  'data': {'device': 'str', '*name': 'str', '*writable': 'bool'} }
+  'data': {'device': 'str', '*name': 'str', '*writable': 'bool',
+           '*bitmap': 'str' } }
 
 ##
 # @NbdServerRemoveMode:
@@ -306,6 +406,30 @@
 ##
 { 'event': 'DEVICE_TRAY_MOVED',
   'data': { 'device': 'str', 'id': 'str', 'tray-open': 'bool' } }
+
+##
+# @PR_MANAGER_STATUS_CHANGED:
+#
+# Emitted whenever the connected status of a persistent reservation
+# manager changes.
+#
+# @id: The id of the PR manager object
+#
+# @connected: true if the PR manager is connected to a backend
+#
+# Since: 3.0
+#
+# Example:
+#
+# <- { "event": "PR_MANAGER_STATUS_CHANGED",
+#      "data": { "id": "pr-helper0",
+#                "connected": true
+#      },
+#      "timestamp": { "seconds": 1519840375, "microseconds": 450486 } }
+#
+##
+{ 'event': 'PR_MANAGER_STATUS_CHANGED',
+  'data': { 'id': 'str', 'connected': 'bool' } }
 
 ##
 # @QuorumOpType:

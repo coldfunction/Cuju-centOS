@@ -64,6 +64,8 @@ static int accel_init_machine(AccelClass *acc, MachineState *ms)
         ms->accelerator = NULL;
         *(acc->allowed) = false;
         object_unref(OBJECT(accel));
+    } else {
+        accel_register_compat_props(ms->accelerator);
     }
     return ret;
 }
@@ -79,8 +81,8 @@ void configure_accelerator(MachineState *ms)
 
     accel = qemu_opt_get(qemu_get_machine_opts(), "accel");
     if (accel == NULL) {
-        /* Use the default "accelerator", tcg */
-        accel = "tcg";
+        /* RHEL uses kvm as the default accelerator, fallback to tcg */
+        accel = "kvm:tcg";
     }
 
     p = accel;
@@ -123,7 +125,7 @@ void configure_accelerator(MachineState *ms)
 void accel_register_compat_props(AccelState *accel)
 {
     AccelClass *class = ACCEL_GET_CLASS(accel);
-    register_compat_props_array(class->global_props);
+    register_accel_compat_props(class->global_props);
 }
 
 static void register_accel_types(void)

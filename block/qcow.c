@@ -26,6 +26,7 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "block/block_int.h"
+#include "block/qdict.h"
 #include "sysemu/block-backend.h"
 #include "qemu/module.h"
 #include "qemu/option.h"
@@ -315,7 +316,7 @@ static int qcow_open(BlockDriverState *bs, QDict *options, int flags,
         goto fail;
     }
 
-    QDECREF(encryptopts);
+    qobject_unref(encryptopts);
     qapi_free_QCryptoBlockOpenOptions(crypto_opts);
     qemu_co_mutex_init(&s->lock);
     return 0;
@@ -326,7 +327,7 @@ static int qcow_open(BlockDriverState *bs, QDict *options, int flags,
     g_free(s->cluster_cache);
     g_free(s->cluster_data);
     qcrypto_block_free(s->crypto);
-    QDECREF(encryptopts);
+    qobject_unref(encryptopts);
     qapi_free_QCryptoBlockOpenOptions(crypto_opts);
     return ret;
 }
@@ -943,8 +944,7 @@ static int coroutine_fn qcow_co_create_opts(const char *filename,
 {
     BlockdevCreateOptions *create_options = NULL;
     BlockDriverState *bs = NULL;
-    QDict *qdict = NULL;
-    QObject *qobj;
+    QDict *qdict;
     Visitor *v;
     const char *val;
     Error *local_err = NULL;
@@ -994,15 +994,12 @@ static int coroutine_fn qcow_co_create_opts(const char *filename,
     qdict_put_str(qdict, "driver", "qcow");
     qdict_put_str(qdict, "file", bs->node_name);
 
-    qobj = qdict_crumple(qdict, errp);
-    QDECREF(qdict);
-    qdict = qobject_to(QDict, qobj);
-    if (qdict == NULL) {
+    v = qobject_input_visitor_new_flat_confused(qdict, errp);
+    if (!v) {
         ret = -EINVAL;
         goto fail;
     }
 
-    v = qobject_input_visitor_new_keyval(QOBJECT(qdict));
     visit_type_BlockdevCreateOptions(v, NULL, &create_options, &local_err);
     visit_free(v);
 
@@ -1025,7 +1022,7 @@ static int coroutine_fn qcow_co_create_opts(const char *filename,
 
     ret = 0;
 fail:
-    QDECREF(qdict);
+    qobject_unref(qdict);
     bdrv_unref(bs);
     qapi_free_BlockdevCreateOptions(create_options);
     return ret;
